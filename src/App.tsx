@@ -1,10 +1,12 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Award,
   Backpack,
   Check,
+  CloudRain,
   Compass,
   FolderOpen,
+  Gift,
   Hammer,
   RotateCcw,
   Send,
@@ -30,8 +32,11 @@ import { TypewriterText } from './components/TypewriterText';
 import { PWAInstallButton } from './components/PWAInstallButton';
 import { OfflineIndicator } from './components/OfflineIndicator';
 import { SurvivalStatsChart } from './components/SurvivalStatsChart';
-import { LeaderboardModal } from './components/LeaderboardModal';
 import { auth } from './firebase';
+
+const LeaderboardModal = lazy(() =>
+  import('./components/LeaderboardModal').then((m) => ({ default: m.LeaderboardModal }))
+);
 import {
   calculateAdventureScore,
   loadSavedNickname,
@@ -56,6 +61,7 @@ import {
   getTalentById,
   TALENTS,
 } from './utils/talents';
+import { rollRandomEvent } from './utils/randomEvents';
 import type {
   AchievementCounters,
   AppliedDeltas,
@@ -295,6 +301,11 @@ export default function App() {
     if (!next) retroAudio.playClick();
   };
 
+  const handleRedrawScene = useCallback(() => {
+    retroAudio.playClick();
+    setSceneSeed((s) => s + 1);
+  }, []);
+
   const fetchEpitaph = useCallback(
     async (
       finalTurn: number,
@@ -346,9 +357,10 @@ export default function App() {
 
       const baseStats = isStart ? overrideStartStats ?? stats : stats;
       const nextTurnNumber = isStart ? 1 : turn + 1;
+      const rolledEvent = isStart ? null : rollRandomEvent(nextTurnNumber);
       const historyPayload = isStart
         ? []
-        : logs.slice(-6).map((l) => ({
+        : logs.slice(-4).map((l) => ({
             turn: l.turn,
             action: l.playerAction,
             story: l.story,
@@ -369,6 +381,13 @@ export default function App() {
               inventory: baseStats.inventory,
             },
             history: historyPayload,
+            randomEvent: rolledEvent
+              ? {
+                  title: rolledEvent.event.title,
+                  category: rolledEvent.event.category,
+                  dmInstruction: rolledEvent.dmInstruction,
+                }
+              : null,
           }),
         });
 
@@ -379,7 +398,7 @@ export default function App() {
 
         const dm = payload as DmTurnResponse;
 
-        // Enforce hunger, starvation & talent multiplier rules cleanly
+        // Enforce hunger, starvation, talent multipliers & random event rules cleanly
         let rawHungerDelta = isStart ? 0 : dm.hunger_change;
         if (!isStart && rawHungerDelta === 0) {
           rawHungerDelta = -6;
@@ -397,7 +416,25 @@ export default function App() {
             );
           }
         }
-        const nextHunger = clamp(baseStats.hunger + rawHungerDelta, 0, baseStats.maxHunger);
+
+        let eventHungerDelta = rolledEvent?.event.hungerDelta ?? 0;
+        if (eventHungerDelta > 0 && baseStats.modifiers.foodGainMultiplier !== 1) {
+          eventHungerDelta = Math.max(
+            1,
+            Math.round(eventHungerDelta * baseStats.modifiers.foodGainMultiplier)
+          );
+        } else if (eventHungerDelta < 0 && baseStats.modifiers.hungerDrainMultiplier !== 1) {
+          eventHungerDelta = -Math.max(
+            1,
+            Math.round(Math.abs(eventHungerDelta) * baseStats.modifiers.hungerDrainMultiplier)
+          );
+        }
+
+        const nextHunger = clamp(
+          baseStats.hunger + rawHungerDelta + eventHungerDelta,
+          0,
+          baseStats.maxHunger
+        );
         const appliedHungerChange = nextHunger - baseStats.hunger;
 
         let starvationDamage = 0;
@@ -415,7 +452,8 @@ export default function App() {
           rawHpDelta = Math.round(rawHpDelta * baseStats.modifiers.foodGainMultiplier);
         }
 
-        const totalHpDelta = isStart ? 0 : rawHpDelta - starvationDamage;
+        const eventHpDelta = rolledEvent?.event.hpDelta ?? 0;
+        const totalHpDelta = isStart ? 0 : rawHpDelta + eventHpDelta - starvationDamage;
         const nextHp = clamp(baseStats.hp + totalHpDelta, 0, baseStats.maxHp);
         const appliedHpChange = nextHp - baseStats.hp;
 
@@ -426,7 +464,16 @@ export default function App() {
             Math.round(rawCoinsDelta * baseStats.modifiers.coinGainMultiplier)
           );
         }
-        const nextCoins = Math.max(0, baseStats.coins + rawCoinsDelta);
+
+        let eventCoinsDelta = rolledEvent?.event.coinsDelta ?? 0;
+        if (eventCoinsDelta > 0 && baseStats.modifiers.coinGainMultiplier > 1) {
+          eventCoinsDelta = Math.max(
+            eventCoinsDelta + 1,
+            Math.round(eventCoinsDelta * baseStats.modifiers.coinGainMultiplier)
+          );
+        }
+
+        const nextCoins = Math.max(0, baseStats.coins + rawCoinsDelta + eventCoinsDelta);
         const appliedCoinsChange = nextCoins - baseStats.coins;
 
         let nextInventory = [...baseStats.inventory];
@@ -448,6 +495,10 @@ export default function App() {
           if (dm.new_item.includes('黃金黑松露')) {
             setFoundTruffle(true);
           }
+        }
+
+        if (!isStart && rolledEvent?.event.tempItem && rolledEvent.event.tempItem !== actuallyGained) {
+          nextInventory.push(rolledEvent.event.tempItem);
         }
 
         const deltas: AppliedDeltas = {
@@ -492,6 +543,7 @@ export default function App() {
           imagePrompt: dm.image_prompt,
           choices: dm.choices,
           unlockedAchievements: newlyUnlocked,
+          randomEvent: rolledEvent ? rolledEvent.event : null,
         };
 
         const nextUnlockedRun = isStart
@@ -879,10 +931,7 @@ export default function App() {
             hp={stats.hp}
             hunger={stats.hunger}
             variationSeed={sceneSeed}
-            onRedrawScene={() => {
-              retroAudio.playClick();
-              setSceneSeed((s) => s + 1);
-            }}
+            onRedrawScene={handleRedrawScene}
           />
 
           <div className="pixel-panel p-4 flex flex-col gap-2.5">
@@ -1042,6 +1091,42 @@ export default function App() {
                       <span className="text-[#9fd67a]">序幕啟程</span>
                     )}
                   </div>
+
+                  {entry.randomEvent && (
+                    <div
+                      className={`px-3 py-2 border flex items-start gap-2.5 text-xs ${
+                        entry.randomEvent.category === 'weather'
+                          ? 'bg-[#1a222b] border-[#4b6f8a]'
+                          : 'bg-[#1d261a] border-[#5f8c4d]'
+                      }`}
+                    >
+                      {entry.randomEvent.category === 'weather' ? (
+                        <CloudRain className="w-4 h-4 text-[#7ec8f2] shrink-0 mt-0.5" />
+                      ) : (
+                        <Gift className="w-4 h-4 text-[#9fd67a] shrink-0 mt-0.5" />
+                      )}
+                      <div className="min-w-0 space-y-0.5">
+                        <p
+                          className={`font-pixel ${
+                            entry.randomEvent.category === 'weather'
+                              ? 'text-[#9bd8fa]'
+                              : 'text-[#b5eb8f]'
+                          }`}
+                        >
+                          {entry.randomEvent.category === 'weather' ? '突發天氣' : '路邊驚喜'}：
+                          {entry.randomEvent.title}
+                        </p>
+                        <p className="text-[#dfd4c1] leading-relaxed">
+                          {entry.randomEvent.description}
+                        </p>
+                        {entry.randomEvent.tempItem && (
+                          <p className="text-[#8ef0a4] font-medium">
+                            + 撿到臨時道具「{entry.randomEvent.tempItem}」已放入背包
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  )}
 
                   <TypewriterText text={entry.story} animate={isLatest} />
 
@@ -1422,19 +1507,23 @@ export default function App() {
           </div>
         </aside>
       </main>
-      <LeaderboardModal
-        isOpen={isLeaderboardOpen}
-        onClose={() => setIsLeaderboardOpen(false)}
-        user={firebaseUser}
-        playerNickname={playerNickname}
-        onNicknameChange={handleNicknameChange}
-        currentScore={currentScore}
-        turn={turn}
-        coins={stats.coins}
-        titleCount={runUnlocked.length}
-        bestTitle={bestTitle}
-        foundTruffle={foundTruffle}
-      />
+      {isLeaderboardOpen && (
+        <Suspense fallback={null}>
+          <LeaderboardModal
+            isOpen={isLeaderboardOpen}
+            onClose={() => setIsLeaderboardOpen(false)}
+            user={firebaseUser}
+            playerNickname={playerNickname}
+            onNicknameChange={handleNicknameChange}
+            currentScore={currentScore}
+            turn={turn}
+            coins={stats.coins}
+            titleCount={runUnlocked.length}
+            bestTitle={bestTitle}
+            foundTruffle={foundTruffle}
+          />
+        </Suspense>
+      )}
       <OfflineIndicator />
     </div>
   );

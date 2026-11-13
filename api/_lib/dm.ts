@@ -1,16 +1,24 @@
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 
 export const MODEL_NAME = 'gemini-4-hydrogen';
 
+let cachedAiClient: GoogleGenAI | null = null;
+let cachedApiKey: string | undefined;
+
 function getAiClient(): GoogleGenAI {
-  return new GoogleGenAI({
-    apiKey: process.env.GEMINI_API_KEY,
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!cachedAiClient || cachedApiKey !== apiKey) {
+    cachedApiKey = apiKey;
+    cachedAiClient = new GoogleGenAI({
+      apiKey,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        },
       },
-    },
-  });
+    });
+  }
+  return cachedAiClient;
 }
 
 export const DM_SYSTEM_INSTRUCTION = `你是奇幻文字 RPG《泥巴王國》的 AI 地下城主 (DM)，語氣風趣、生動、偶爾帶點冷幽默。
@@ -113,6 +121,11 @@ export interface TurnRequestBody {
     inventory: string[];
   };
   history?: HistoryItem[];
+  randomEvent?: {
+    title?: string;
+    category?: string;
+    dmInstruction?: string;
+  } | null;
 }
 
 export interface EpitaphRequestBody {
@@ -139,8 +152,12 @@ async function callGeminiWithRetry<T>(fn: () => Promise<T>, maxRetries = 2): Pro
       return await fn();
     } catch (err) {
       lastError = err;
+      const status = (err as { status?: number })?.status;
+      if (typeof status === 'number' && status >= 400 && status < 500 && status !== 429) {
+        break;
+      }
       if (attempt < maxRetries) {
-        await new Promise((resolve) => setTimeout(resolve, 600 * (attempt + 1)));
+        await new Promise((resolve) => setTimeout(resolve, 350 * (attempt + 1)));
       }
     }
   }
@@ -166,7 +183,7 @@ export async function generateDmTurn(body: TurnRequestBody) {
     coins: 20,
     inventory: ['生鏽的木湯匙', '半顆蘋果'],
   };
-  const history = Array.isArray(body.history) ? body.history.slice(-6) : [];
+  const history = Array.isArray(body.history) ? body.history.slice(-4) : [];
 
   if (!isStart && !action) {
     return {
@@ -184,6 +201,11 @@ export async function generateDmTurn(body: TurnRequestBody) {
           )
           .join('\n')
       : '尚無先前紀錄（冒險剛開始）。';
+
+  const randomEventPrompt =
+    !isStart && body.randomEvent?.dmInstruction
+      ? `\n【本回合觸發隨機事件：${body.randomEvent.title ?? '旅途突發狀況'}】\n${body.randomEvent.dmInstruction}\n（注意：系統已另外結算此隨機事件的額外數值與臨時道具，請專注在劇情與對話中生動反映此事件，不需在 new_item 重複輸出同一項臨時道具。）\n`
+      : '';
 
   const userPrompt = isStart
     ? `【開始新冒險 - 第 1 回合】
@@ -203,7 +225,7 @@ ${historySummary}
 - 飽食度 (Hunger): ${stats.hunger}/100 ${stats.hunger <= 0 ? '（警告：飽食度已歸零，沒吃到東西會開始飢餓扣血！）' : ''}
 - 豬豬幣 (Coins): ${stats.coins}
 - 背包物品: ${stats.inventory.join('、') || '空無一物'}
-
+${randomEventPrompt}
 本回合玩家的行動：「${action}」
 
 請根據玩家行動推進泥巴王國的奇幻劇情，計算合理的 HP / 飽食度 / 豬豬幣變化與物品得失，並給出 3 個有趣的新選項與對應英文像素場景提示詞。`;
@@ -218,6 +240,7 @@ ${historySummary}
           systemInstruction: DM_SYSTEM_INSTRUCTION,
           responseMimeType: 'application/json',
           responseSchema: dmTurnSchema,
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
         },
       })
     );
@@ -303,6 +326,7 @@ export async function generateDmEpitaph(body: EpitaphRequestBody) {
           '你是幽默風趣的《泥巴王國》墓碑雕刻師，專為陣亡的貪吃小豬撰寫搞笑又帶點同情的墓誌銘（繁體中文）。',
         responseMimeType: 'application/json',
         responseSchema: epitaphSchema,
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
       },
     });
 

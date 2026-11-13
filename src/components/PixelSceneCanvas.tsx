@@ -106,7 +106,7 @@ interface PixelSceneCanvasProps {
   onRedrawScene: () => void;
 }
 
-export const PixelSceneCanvas: React.FC<PixelSceneCanvasProps> = ({
+export const PixelSceneCanvas: React.FC<PixelSceneCanvasProps> = React.memo(({
   imagePrompt,
   story,
   phase,
@@ -514,4 +514,4 @@ export const PixelSceneCanvas: React.FC<PixelSceneCanvasProps> = ({
       </div>
     </div>
   );
-};
+});

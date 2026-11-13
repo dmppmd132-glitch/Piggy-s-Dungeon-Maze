@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 
 interface TypewriterTextProps {
   text: string;
@@ -6,12 +6,14 @@ interface TypewriterTextProps {
   onComplete?: () => void;
 }
 
-export const TypewriterText: React.FC<TypewriterTextProps> = ({
+export const TypewriterText: React.FC<TypewriterTextProps> = React.memo(({
   text,
   animate,
   onComplete,
 }) => {
   const [visibleCount, setVisibleCount] = useState(() => (animate ? 0 : text.length));
+  const onCompleteRef = useRef(onComplete);
+  onCompleteRef.current = onComplete;
 
   useEffect(() => {
     const prefersReducedMotion =
@@ -20,25 +22,25 @@ export const TypewriterText: React.FC<TypewriterTextProps> = ({
 
     if (!animate || prefersReducedMotion) {
       setVisibleCount(text.length);
-      onComplete?.();
+      onCompleteRef.current?.();
       return;
     }
 
     setVisibleCount(0);
     let index = 0;
     const interval = window.setInterval(() => {
-      index += 2;
+      index += 4;
       if (index >= text.length) {
         setVisibleCount(text.length);
         window.clearInterval(interval);
-        onComplete?.();
+        onCompleteRef.current?.();
       } else {
         setVisibleCount(index);
       }
-    }, 24);
+    }, 16);
 
     return () => window.clearInterval(interval);
-  }, [text, animate, onComplete]);
+  }, [text, animate]);
 
   const isTyping = visibleCount < text.length;
 
@@ -47,7 +49,7 @@ export const TypewriterText: React.FC<TypewriterTextProps> = ({
       onClick={() => {
         if (isTyping) {
           setVisibleCount(text.length);
-          onComplete?.();
+          onCompleteRef.current?.();
         }
       }}
       className={isTyping ? 'cursor-pointer' : undefined}
@@ -64,4 +66,5 @@ export const TypewriterText: React.FC<TypewriterTextProps> = ({
       </p>
     </div>
   );
-};
+});
+

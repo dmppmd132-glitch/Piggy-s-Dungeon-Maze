@@ -61,6 +61,19 @@ export interface AchievementCounters {
   starveSurviveCount: number;
 }
 
+export type RandomEventCategory = 'weather' | 'surprise';
+
+export interface TurnRandomEvent {
+  id: string;
+  category: RandomEventCategory;
+  title: string;
+  description: string;
+  hpDelta: number;
+  hungerDelta: number;
+  coinsDelta: number;
+  tempItem: string | null;
+}
+
 export interface LogEntry {
   id: string;
   turn: number;
@@ -72,6 +85,7 @@ export interface LogEntry {
   imagePrompt: string;
   choices: string[];
   unlockedAchievements?: UnlockedAchievement[];
+  randomEvent?: TurnRandomEvent | null;
 }
 
 export interface GameOverSummary {

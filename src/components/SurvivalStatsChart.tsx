@@ -62,7 +62,7 @@ const CustomTooltip: React.FC<{
   );
 };
 
-export const SurvivalStatsChart: React.FC<SurvivalStatsChartProps> = ({
+export const SurvivalStatsChart: React.FC<SurvivalStatsChartProps> = React.memo(({
   logs,
   initialHp = 100,
   initialHunger = 80,
@@ -181,4 +181,4 @@ export const SurvivalStatsChart: React.FC<SurvivalStatsChartProps> = ({
       )}
     </div>
   );
-};
+});
