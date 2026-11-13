@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Award,
   Backpack,
   Compass,
   RotateCcw,
@@ -15,20 +16,31 @@ import {
   PixelHeartIcon,
   PixelHungerIcon,
   PixelItemIcon,
+  PixelTrophyIcon,
   type PigMood,
 } from './components/PixelSprites';
 import { PixelSceneCanvas } from './components/PixelSceneCanvas';
 import { TypewriterText } from './components/TypewriterText';
 import { PWAInstallButton } from './components/PWAInstallButton';
 import { OfflineIndicator } from './components/OfflineIndicator';
+import { SurvivalStatsChart } from './components/SurvivalStatsChart';
 import { retroAudio } from './utils/sound';
+import {
+  evaluateTurnAchievements,
+  HIDDEN_ACHIEVEMENTS,
+  INITIAL_COUNTERS,
+  loadPersistedAchievementIds,
+  savePersistedAchievementIds,
+} from './utils/achievements';
 import type {
+  AchievementCounters,
   AppliedDeltas,
   DmTurnResponse,
   GameOverSummary,
   GamePhase,
   LogEntry,
   PlayerStats,
+  UnlockedAchievement,
 } from './types/game';
 
 const INITIAL_STATS: PlayerStats = {
@@ -82,6 +94,11 @@ export default function App() {
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [foundTruffle, setFoundTruffle] = useState<boolean>(false);
   const [gameOverSummary, setGameOverSummary] = useState<GameOverSummary | null>(null);
+  const [counters, setCounters] = useState<AchievementCounters>(INITIAL_COUNTERS);
+  const [runUnlocked, setRunUnlocked] = useState<UnlockedAchievement[]>([]);
+  const [allUnlockedIds, setAllUnlockedIds] = useState<string[]>(() =>
+    loadPersistedAchievementIds()
+  );
 
   const logBottomRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -239,23 +256,56 @@ export default function App() {
           lostItem: actuallyLost,
         };
 
+        const nextStats: PlayerStats = {
+          ...baseStats,
+          hp: nextHp,
+          hunger: nextHunger,
+          coins: nextCoins,
+          inventory: nextInventory,
+        };
+
+        const alreadyInRun = new Set(isStart ? [] : runUnlocked.map((a) => a.id));
+        const { nextCounters, newlyUnlocked } = evaluateTurnAchievements({
+          turn: nextTurnNumber,
+          isStart,
+          playerAction: cleanAction,
+          story: dm.story,
+          imagePrompt: dm.image_prompt,
+          deltas,
+          prevStats: baseStats,
+          nextStats,
+          prevCounters: isStart ? INITIAL_COUNTERS : counters,
+          alreadyUnlockedInRun: alreadyInRun,
+        });
+
         const newEntry: LogEntry = {
           id: `${Date.now()}-${nextTurnNumber}`,
           turn: nextTurnNumber,
           playerAction: isStart ? null : cleanAction,
           story: dm.story,
           deltas,
+          hpAfter: nextHp,
+          hungerAfter: nextHunger,
           imagePrompt: dm.image_prompt,
           choices: dm.choices,
+          unlockedAchievements: newlyUnlocked,
         };
 
-        setStats({
-          ...baseStats,
-          hp: nextHp,
-          hunger: nextHunger,
-          coins: nextCoins,
-          inventory: nextInventory,
-        });
+        setStats(nextStats);
+        setCounters(nextCounters);
+        if (isStart) {
+          setRunUnlocked(newlyUnlocked);
+        } else if (newlyUnlocked.length > 0) {
+          setRunUnlocked((prev) => [...prev, ...newlyUnlocked]);
+        }
+        if (newlyUnlocked.length > 0) {
+          const mergedIds = Array.from(
+            new Set([...allUnlockedIds, ...newlyUnlocked.map((a) => a.id)])
+          );
+          setAllUnlockedIds(mergedIds);
+          savePersistedAchievementIds(mergedIds);
+        }
+
         setTurn(nextTurnNumber);
         setLogs((prev) => (isStart ? [newEntry] : [...prev, newEntry]));
         setCurrentChoices(dm.choices);
@@ -272,7 +322,9 @@ export default function App() {
           fetchEpitaph(nextTurnNumber, nextCoins, nextInventory, cleanAction, dm.story);
         } else {
           setPhase('PLAYING');
-          if (isStart) {
+          if (newlyUnlocked.length > 0) {
+            retroAudio.playAchievement();
+          } else if (isStart) {
             retroAudio.playStart();
           } else if (appliedHpChange < 0) {
             retroAudio.playHurt();
@@ -292,7 +344,7 @@ export default function App() {
         setIsLoading(false);
       }
     },
-    [isLoading, stats, turn, logs, fetchEpitaph]
+    [isLoading, stats, turn, logs, counters, runUnlocked, allUnlockedIds, fetchEpitaph]
   );
 
   const handleStartNewGame = () => {
@@ -306,6 +358,8 @@ export default function App() {
     setCustomAction('');
     setFoundTruffle(false);
     setGameOverSummary(null);
+    setCounters(INITIAL_COUNTERS);
+    setRunUnlocked([]);
     executeTurn(true);
   };
 
@@ -357,8 +411,16 @@ export default function App() {
             <h1 className="font-pixel text-lg sm:text-xl text-[#f5ebd9] tracking-wide whitespace-nowrap">
               泥巴王國：貪吃小豬大冒險
             </h1>
-            <p className="text-xs text-[#c7b49a] flex items-center gap-2">
+            <p className="text-xs text-[#c7b49a] flex flex-wrap items-center gap-x-2 gap-y-0.5">
               <span>{phase === 'TITLE' ? '準備啟程' : `第 ${turn} 回合`}</span>
+              {runUnlocked.length > 0 && (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <span className="text-[#ffd95a]">
+                    稱號：{runUnlocked[runUnlocked.length - 1].title}
+                  </span>
+                </>
+              )}
               <span aria-hidden="true">·</span>
               <span>{foundTruffle ? '已尋獲黃金黑松露' : '目標：尋找黃金黑松露'}</span>
             </p>
@@ -483,8 +545,9 @@ export default function App() {
           </div>
         </section>
 
-        {/* CENTER COLUMN: Adventure Log + Action Controls */}
-        <section className="lg:col-span-5 pixel-panel p-4 flex flex-col gap-4 min-h-[540px] lg:h-[calc(100vh-150px)]">
+        {/* CENTER COLUMN: Adventure Log + Survival Trend Dashboard */}
+        <div className="lg:col-span-5 flex flex-col gap-4">
+        <section className="pixel-panel p-4 flex flex-col gap-4 min-h-[540px] lg:h-[calc(100vh-150px)]">
           <div className="flex items-center justify-between border-b-2 border-[#4a3525] pb-2.5">
             <div className="flex items-center gap-2">
               <Sparkles className="w-4 h-4 text-[#f3b562]" />
@@ -593,6 +656,28 @@ export default function App() {
                       )}
                     </div>
                   )}
+
+                  {/* Hidden Achievement Unlock Record in Adventure Log */}
+                  {entry.unlockedAchievements && entry.unlockedAchievements.length > 0 && (
+                    <div className="pt-2 space-y-2">
+                      {entry.unlockedAchievements.map((ach) => (
+                        <div
+                          key={ach.id}
+                          className="bg-[#2b2010] border border-[#d99b26] px-3 py-2 flex items-start gap-2.5"
+                        >
+                          <PixelTrophyIcon className="w-5 h-5 shrink-0 mt-0.5" />
+                          <div className="min-w-0">
+                            <p className="font-pixel text-xs text-[#ffd95a]">
+                              解鎖隱藏稱號：「{ach.title}」
+                            </p>
+                            <p className="text-xs text-[#e6d5b8] mt-0.5">
+                              {ach.description}
+                            </p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </article>
               );
             })}
@@ -640,13 +725,20 @@ export default function App() {
                     「{gameOverSummary.epitaph}」
                   </p>
                 )}
-                <div className="flex items-center justify-center gap-4 text-xs text-[#cbb89e] font-num">
+                <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1 text-xs text-[#cbb89e] font-num">
                   <span>存活回合：{turn}</span>
                   <span>·</span>
                   <span>遺留豬豬幣：{stats.coins}</span>
                   <span>·</span>
                   <span>攜帶道具：{stats.inventory.length} 件</span>
+                  <span>·</span>
+                  <span>本局稱號：{runUnlocked.length} 個</span>
                 </div>
+                {runUnlocked.length > 0 && (
+                  <p className="text-xs text-[#ffd95a]">
+                    獲得稱號：{runUnlocked.map((a) => `「${a.title}」`).join('、')}
+                  </p>
+                )}
                 <button
                   type="button"
                   onClick={handleStartNewGame}
@@ -708,49 +800,98 @@ export default function App() {
           )}
         </section>
 
-        {/* RIGHT COLUMN: Inventory Bag */}
-        <aside className="lg:col-span-3 pixel-panel p-4 flex flex-col gap-3">
-          <div className="flex items-center justify-between border-b-2 border-[#4a3525] pb-2.5">
-            <div className="flex items-center gap-2">
-              <Backpack className="w-4 h-4 text-[#f3b562]" />
-              <h2 className="font-pixel text-base text-[#f5ebd9]">小豬背包</h2>
+        <SurvivalStatsChart logs={logs} />
+        </div>
+
+        {/* RIGHT COLUMN: Inventory Bag + Hidden Achievements */}
+        <aside className="lg:col-span-3 flex flex-col gap-4">
+          <div className="pixel-panel p-4 flex flex-col gap-3">
+            <div className="flex items-center justify-between border-b-2 border-[#4a3525] pb-2.5">
+              <div className="flex items-center gap-2">
+                <Backpack className="w-4 h-4 text-[#f3b562]" />
+                <h2 className="font-pixel text-base text-[#f5ebd9]">小豬背包</h2>
+              </div>
+              <span className="font-num text-xs text-[#b8a58d]">
+                {stats.inventory.length} 件道具
+              </span>
             </div>
-            <span className="font-num text-xs text-[#b8a58d]">
-              {stats.inventory.length} 件道具
-            </span>
+
+            <p className="text-xs text-[#b8a58d] leading-relaxed">
+              點擊道具可自動將「使用 [道具名稱]」填入下方輸入框。
+            </p>
+
+            {stats.inventory.length === 0 ? (
+              <div className="pixel-panel-inner p-4 text-center text-xs text-[#9c8a74]">
+                背包空空如也，連一粒松露屑都沒有。
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 gap-2">
+                {stats.inventory.map((item, idx) => (
+                  <button
+                    key={`${item}-${idx}`}
+                    type="button"
+                    disabled={phase !== 'PLAYING' || isLoading}
+                    onClick={() => handleSelectItem(item)}
+                    className="pixel-btn bg-[#2c2018] hover:bg-[#3f2e22] px-3 py-2.5 flex items-center gap-3 text-left cursor-pointer disabled:opacity-55"
+                  >
+                    <div className="pixel-panel-inner p-1.5 shrink-0">
+                      <PixelItemIcon itemName={item} className="w-6 h-6" />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm font-medium text-[#f5ebd9] truncate">
+                        {item}
+                      </div>
+                      <div className="text-[11px] text-[#b8a58d]">點擊填入使用</div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
 
-          <p className="text-xs text-[#b8a58d] leading-relaxed">
-            點擊道具可自動將「使用 [道具名稱]」填入下方輸入框。
-          </p>
+          {/* Hidden Achievements Trophy Case */}
+          <div className="pixel-panel p-4 flex flex-col gap-3">
+            <div className="flex items-center justify-between border-b-2 border-[#4a3525] pb-2.5">
+              <div className="flex items-center gap-2">
+                <Award className="w-4 h-4 text-[#ffd95a]" />
+                <h2 className="font-pixel text-base text-[#f5ebd9]">隱藏稱號</h2>
+              </div>
+              <span className="font-num text-xs text-[#b8a58d]">
+                {allUnlockedIds.length}/{HIDDEN_ACHIEVEMENTS.length}
+              </span>
+            </div>
 
-          {stats.inventory.length === 0 ? (
-            <div className="pixel-panel-inner p-4 text-center text-xs text-[#9c8a74]">
-              背包空空如也，連一粒松露屑都沒有。
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 gap-2">
-              {stats.inventory.map((item, idx) => (
-                <button
-                  key={`${item}-${idx}`}
-                  type="button"
-                  disabled={phase !== 'PLAYING' || isLoading}
-                  onClick={() => handleSelectItem(item)}
-                  className="pixel-btn bg-[#2c2018] hover:bg-[#3f2e22] px-3 py-2.5 flex items-center gap-3 text-left cursor-pointer disabled:opacity-55"
-                >
-                  <div className="pixel-panel-inner p-1.5 shrink-0">
-                    <PixelItemIcon itemName={item} className="w-6 h-6" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="text-sm font-medium text-[#f5ebd9] truncate">
-                      {item}
+            <div className="space-y-2 max-h-[280px] overflow-y-auto rpg-scroll pr-1">
+              {HIDDEN_ACHIEVEMENTS.map((ach) => {
+                const isUnlocked = allUnlockedIds.includes(ach.id);
+                return (
+                  <div
+                    key={ach.id}
+                    className={`pixel-panel-inner px-3 py-2 flex items-start gap-2.5 ${
+                      isUnlocked ? 'border-[#8f6a28]' : 'opacity-80'
+                    }`}
+                  >
+                    <PixelTrophyIcon
+                      className="w-4 h-4 shrink-0 mt-0.5"
+                      locked={!isUnlocked}
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div
+                        className={`text-xs font-bold truncate ${
+                          isUnlocked ? 'text-[#ffd95a]' : 'text-[#9e8c77]'
+                        }`}
+                      >
+                        {isUnlocked ? ach.title : '???（隱藏稱號）'}
+                      </div>
+                      <p className="text-[11px] text-[#b8a58d] leading-snug mt-0.5">
+                        {isUnlocked ? ach.description : ach.hint}
+                      </p>
                     </div>
-                    <div className="text-[11px] text-[#b8a58d]">點擊填入使用</div>
                   </div>
-                </button>
-              ))}
+                );
+              })}
             </div>
-          )}
+          </div>
         </aside>
       </main>
       <OfflineIndicator />

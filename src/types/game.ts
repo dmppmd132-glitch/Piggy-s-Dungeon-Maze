@@ -29,14 +29,39 @@ export interface AppliedDeltas {
   lostItem: string | null;
 }
 
+export interface AchievementDefinition {
+  id: string;
+  title: string;
+  description: string;
+  hint: string;
+}
+
+export interface UnlockedAchievement {
+  id: string;
+  title: string;
+  description: string;
+  unlockedAtTurn: number;
+}
+
+export interface AchievementCounters {
+  eatCount: number;
+  wolfCount: number;
+  goblinCount: number;
+  playDeadCount: number;
+  starveSurviveCount: number;
+}
+
 export interface LogEntry {
   id: string;
   turn: number;
   playerAction: string | null;
   story: string;
   deltas: AppliedDeltas;
+  hpAfter: number;
+  hungerAfter: number;
   imagePrompt: string;
   choices: string[];
+  unlockedAchievements?: UnlockedAchievement[];
 }
 
 export interface GameOverSummary {

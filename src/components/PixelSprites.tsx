@@ -131,6 +131,21 @@ export const PixelCoinIcon: React.FC<{ className?: string }> = ({ className = 'w
   </svg>
 );
 
+export const PixelTrophyIcon: React.FC<{ className?: string; locked?: boolean }> = ({
+  className = 'w-5 h-5',
+  locked = false,
+}) => (
+  <svg viewBox="0 0 12 12" shapeRendering="crispEdges" className={className} aria-hidden="true">
+    <rect x="3" y="2" width="6" height="4" fill={locked ? '#4f4338' : '#f5b041'} />
+    <rect x="4" y="2" width="2" height="3" fill={locked ? '#635446' : '#fff0a6'} />
+    <rect x="2" y="2" width="1" height="3" fill={locked ? '#3d332a' : '#d98a1e'} />
+    <rect x="9" y="2" width="1" height="3" fill={locked ? '#3d332a' : '#d98a1e'} />
+    <rect x="4" y="6" width="4" height="1" fill={locked ? '#4f4338' : '#d98a1e'} />
+    <rect x="5" y="7" width="2" height="2" fill={locked ? '#4f4338' : '#c47814'} />
+    <rect x="3" y="9" width="6" height="2" fill={locked ? '#3d332a' : '#8c5319'} />
+  </svg>
+);
+
 export const PixelItemIcon: React.FC<{ itemName: string; className?: string }> = ({
   itemName,
   className = 'w-7 h-7',

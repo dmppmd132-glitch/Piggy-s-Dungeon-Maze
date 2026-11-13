@@ -73,6 +73,13 @@ class RetroAudioEngine {
     this.playTone(1318.51, 0.14, 'square', 0.04, 0.06);
   }
 
+  public playAchievement(): void {
+    const notes = [523.25, 659.25, 783.99, 1046.5];
+    notes.forEach((n, idx) => {
+      this.playTone(n, 0.1, 'square', 0.045, idx * 0.075);
+    });
+  }
+
   public playEat(): void {
     this.playTone(330, 0.07, 'triangle', 0.05, 0);
     this.playTone(440, 0.07, 'triangle', 0.05, 0.07);
