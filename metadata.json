@@ -1,0 +1,6 @@
+{
+  "name": "泥巴王國：貪吃小豬大冒險",
+  "description": "繁體中文 AI 地下城主文字冒險 RPG，扮演勇敢又貪吃的小豬探索泥巴王國、尋找傳說中的黃金黑松露。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
