@@ -2,14 +2,20 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Award,
   Backpack,
+  Check,
   Compass,
+  FolderOpen,
+  Hammer,
   RotateCcw,
   Send,
   Skull,
   Sparkles,
+  Trophy,
   Volume2,
   VolumeX,
+  Zap,
 } from 'lucide-react';
+import { onAuthStateChanged, type User } from 'firebase/auth';
 import {
   PigPortrait,
   PixelCoinIcon,
@@ -24,7 +30,20 @@ import { TypewriterText } from './components/TypewriterText';
 import { PWAInstallButton } from './components/PWAInstallButton';
 import { OfflineIndicator } from './components/OfflineIndicator';
 import { SurvivalStatsChart } from './components/SurvivalStatsChart';
+import { LeaderboardModal } from './components/LeaderboardModal';
+import { auth } from './firebase';
+import {
+  calculateAdventureScore,
+  loadSavedNickname,
+  saveNickname,
+  submitLeaderboardScore,
+} from './utils/leaderboard';
 import { retroAudio } from './utils/sound';
+import {
+  applyCrafting,
+  findAvailableCrafts,
+  type AvailableCraft,
+} from './utils/crafting';
 import {
   evaluateTurnAchievements,
   HIDDEN_ACHIEVEMENTS,
@@ -32,6 +51,11 @@ import {
   loadPersistedAchievementIds,
   savePersistedAchievementIds,
 } from './utils/achievements';
+import {
+  DEFAULT_TALENT_MODIFIERS,
+  getTalentById,
+  TALENTS,
+} from './utils/talents';
 import type {
   AchievementCounters,
   AppliedDeltas,
@@ -40,6 +64,7 @@ import type {
   GamePhase,
   LogEntry,
   PlayerStats,
+  TalentId,
   UnlockedAchievement,
 } from './types/game';
 
@@ -50,6 +75,8 @@ const INITIAL_STATS: PlayerStats = {
   maxHunger: 100,
   coins: 20,
   inventory: ['生鏽的木湯匙', '半顆蘋果'],
+  talentId: null,
+  modifiers: DEFAULT_TALENT_MODIFIERS,
 };
 
 const INITIAL_IMAGE_PROMPT =
@@ -71,6 +98,66 @@ function getHungerStateLabel(hunger: number): string {
   if (hunger <= 25) return '飢腸轆轆';
   if (hunger <= 55) return '有點嘴饞';
   return '飽足';
+}
+
+const SAVE_GAME_KEY = 'mud_kingdom_save_game_v1';
+
+interface SavedAdventureState {
+  phase: GamePhase;
+  stats: PlayerStats;
+  turn: number;
+  logs: LogEntry[];
+  currentChoices: string[];
+  currentImagePrompt: string;
+  currentStoryForScene: string;
+  foundTruffle: boolean;
+  counters: AchievementCounters;
+  runUnlocked: UnlockedAchievement[];
+  gameOverSummary: GameOverSummary | null;
+  savedAt: string;
+}
+
+function loadSavedAdventure(): SavedAdventureState | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.localStorage.getItem(SAVE_GAME_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<SavedAdventureState>;
+    if (
+      !parsed ||
+      typeof parsed.turn !== 'number' ||
+      parsed.turn <= 0 ||
+      !parsed.stats ||
+      !Array.isArray(parsed.logs) ||
+      parsed.logs.length === 0
+    ) {
+      return null;
+    }
+    return {
+      phase: parsed.phase === 'GAME_OVER' ? 'GAME_OVER' : 'PLAYING',
+      stats: {
+        ...parsed.stats,
+        talentId: parsed.stats.talentId ?? null,
+        modifiers: parsed.stats.modifiers ?? DEFAULT_TALENT_MODIFIERS,
+      },
+      turn: parsed.turn,
+      logs: parsed.logs,
+      currentChoices: Array.isArray(parsed.currentChoices) ? parsed.currentChoices : [],
+      currentImagePrompt:
+        typeof parsed.currentImagePrompt === 'string'
+          ? parsed.currentImagePrompt
+          : INITIAL_IMAGE_PROMPT,
+      currentStoryForScene:
+        typeof parsed.currentStoryForScene === 'string' ? parsed.currentStoryForScene : '',
+      foundTruffle: Boolean(parsed.foundTruffle),
+      counters: parsed.counters ?? INITIAL_COUNTERS,
+      runUnlocked: Array.isArray(parsed.runUnlocked) ? parsed.runUnlocked : [],
+      gameOverSummary: parsed.gameOverSummary ?? null,
+      savedAt: typeof parsed.savedAt === 'string' ? parsed.savedAt : '',
+    };
+  } catch {
+    return null;
+  }
 }
 
 export default function App() {
@@ -99,9 +186,66 @@ export default function App() {
   const [allUnlockedIds, setAllUnlockedIds] = useState<string[]>(() =>
     loadPersistedAchievementIds()
   );
+  const [hasSavedGame, setHasSavedGame] = useState<boolean>(() =>
+    Boolean(loadSavedAdventure())
+  );
+  const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
+  const [isLeaderboardOpen, setIsLeaderboardOpen] = useState<boolean>(false);
+  const [playerNickname, setPlayerNickname] = useState<string>(() => loadSavedNickname());
+  const [craftNotice, setCraftNotice] = useState<string | null>(null);
+  const [selectedTalentId, setSelectedTalentId] = useState<TalentId>('glutton');
+
+  const handleNicknameChange = useCallback((name: string) => {
+    const saved = saveNickname(name);
+    setPlayerNickname(saved);
+  }, []);
 
   const logBottomRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      setFirebaseUser(user);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Serialize and persist current adventure state to localStorage
+  useEffect(() => {
+    if (phase === 'TITLE' || phase === 'TALENT_SELECT' || turn <= 0 || logs.length === 0) return;
+    try {
+      const payload: SavedAdventureState = {
+        phase,
+        stats,
+        turn,
+        logs,
+        currentChoices,
+        currentImagePrompt,
+        currentStoryForScene,
+        foundTruffle,
+        counters,
+        runUnlocked,
+        gameOverSummary,
+        savedAt: new Date().toISOString(),
+      };
+      window.localStorage.setItem(SAVE_GAME_KEY, JSON.stringify(payload));
+      setHasSavedGame(true);
+    } catch {
+      // ignore storage quota errors
+    }
+  }, [
+    phase,
+    stats,
+    turn,
+    logs,
+    currentChoices,
+    currentImagePrompt,
+    currentStoryForScene,
+    foundTruffle,
+    counters,
+    runUnlocked,
+    gameOverSummary,
+  ]);
 
   useEffect(() => {
     logBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -114,6 +258,35 @@ export default function App() {
     if (foundTruffle || stats.coins >= 60) return 'rich';
     return 'normal';
   }, [phase, stats.hp, stats.hunger, stats.coins, foundTruffle]);
+
+  const currentScore = useMemo(
+    () =>
+      calculateAdventureScore({
+        turn,
+        coins: stats.coins,
+        titleCount: runUnlocked.length,
+        foundTruffle,
+        hp: stats.hp,
+      }),
+    [turn, stats.coins, runUnlocked.length, foundTruffle, stats.hp]
+  );
+
+  const bestTitle = runUnlocked.length > 0 ? runUnlocked[runUnlocked.length - 1].title : '';
+  const activeTalent = useMemo(() => getTalentById(stats.talentId), [stats.talentId]);
+
+  const availableCrafts = useMemo(
+    () => findAvailableCrafts(stats.inventory),
+    [stats.inventory]
+  );
+
+  const craftByInventoryIndex = useMemo(() => {
+    const map = new Map<number, AvailableCraft>();
+    for (const craft of availableCrafts) {
+      if (!map.has(craft.indexA)) map.set(craft.indexA, craft);
+      if (!map.has(craft.indexB)) map.set(craft.indexB, craft);
+    }
+    return map;
+  }, [availableCrafts]);
 
   const toggleMute = () => {
     const next = !isMuted;
@@ -162,7 +335,7 @@ export default function App() {
   );
 
   const executeTurn = useCallback(
-    async (isStart: boolean, actionText?: string) => {
+    async (isStart: boolean, actionText?: string, overrideStartStats?: PlayerStats) => {
       if (isLoading) return;
       const cleanAction = actionText?.trim() || '';
       if (!isStart && !cleanAction) return;
@@ -171,7 +344,7 @@ export default function App() {
       setErrorMsg(null);
       setLastFailedRequest(null);
 
-      const baseStats = isStart ? INITIAL_STATS : stats;
+      const baseStats = isStart ? overrideStartStats ?? stats : stats;
       const nextTurnNumber = isStart ? 1 : turn + 1;
       const historyPayload = isStart
         ? []
@@ -206,10 +379,23 @@ export default function App() {
 
         const dm = payload as DmTurnResponse;
 
-        // Enforce hunger & starvation rules cleanly
+        // Enforce hunger, starvation & talent multiplier rules cleanly
         let rawHungerDelta = isStart ? 0 : dm.hunger_change;
         if (!isStart && rawHungerDelta === 0) {
           rawHungerDelta = -6;
+        }
+        if (!isStart) {
+          if (rawHungerDelta > 0 && baseStats.modifiers.foodGainMultiplier !== 1) {
+            rawHungerDelta = Math.max(
+              1,
+              Math.round(rawHungerDelta * baseStats.modifiers.foodGainMultiplier)
+            );
+          } else if (rawHungerDelta < 0 && baseStats.modifiers.hungerDrainMultiplier !== 1) {
+            rawHungerDelta = -Math.max(
+              1,
+              Math.round(Math.abs(rawHungerDelta) * baseStats.modifiers.hungerDrainMultiplier)
+            );
+          }
         }
         const nextHunger = clamp(baseStats.hunger + rawHungerDelta, 0, baseStats.maxHunger);
         const appliedHungerChange = nextHunger - baseStats.hunger;
@@ -219,11 +405,28 @@ export default function App() {
           starvationDamage = 10;
         }
 
-        const totalHpDelta = isStart ? 0 : dm.hp_change - starvationDamage;
+        let rawHpDelta = isStart ? 0 : dm.hp_change;
+        if (
+          !isStart &&
+          dm.hunger_change > 0 &&
+          rawHpDelta > 0 &&
+          baseStats.modifiers.foodGainMultiplier !== 1
+        ) {
+          rawHpDelta = Math.round(rawHpDelta * baseStats.modifiers.foodGainMultiplier);
+        }
+
+        const totalHpDelta = isStart ? 0 : rawHpDelta - starvationDamage;
         const nextHp = clamp(baseStats.hp + totalHpDelta, 0, baseStats.maxHp);
         const appliedHpChange = nextHp - baseStats.hp;
 
-        const nextCoins = Math.max(0, baseStats.coins + (isStart ? 0 : dm.coins_change));
+        let rawCoinsDelta = isStart ? 0 : dm.coins_change;
+        if (!isStart && rawCoinsDelta > 0 && baseStats.modifiers.coinGainMultiplier > 1) {
+          rawCoinsDelta = Math.max(
+            rawCoinsDelta + 1,
+            Math.round(rawCoinsDelta * baseStats.modifiers.coinGainMultiplier)
+          );
+        }
+        const nextCoins = Math.max(0, baseStats.coins + rawCoinsDelta);
         const appliedCoinsChange = nextCoins - baseStats.coins;
 
         let nextInventory = [...baseStats.inventory];
@@ -291,13 +494,18 @@ export default function App() {
           unlockedAchievements: newlyUnlocked,
         };
 
+        const nextUnlockedRun = isStart
+          ? newlyUnlocked
+          : newlyUnlocked.length > 0
+          ? [...runUnlocked, ...newlyUnlocked]
+          : runUnlocked;
+        const nextFoundTruffle = isStart
+          ? false
+          : foundTruffle || Boolean(actuallyGained && actuallyGained.includes('黃金黑松露'));
+
         setStats(nextStats);
         setCounters(nextCounters);
-        if (isStart) {
-          setRunUnlocked(newlyUnlocked);
-        } else if (newlyUnlocked.length > 0) {
-          setRunUnlocked((prev) => [...prev, ...newlyUnlocked]);
-        }
+        setRunUnlocked(nextUnlockedRun);
         if (newlyUnlocked.length > 0) {
           const mergedIds = Array.from(
             new Set([...allUnlockedIds, ...newlyUnlocked.map((a) => a.id)])
@@ -313,6 +521,32 @@ export default function App() {
         setCurrentStoryForScene(dm.story);
         setCustomAction('');
         setSceneSeed((s) => s + 1);
+
+        if (firebaseUser && firebaseUser.emailVerified) {
+          const nextScore = calculateAdventureScore({
+            turn: nextTurnNumber,
+            coins: nextCoins,
+            titleCount: nextUnlockedRun.length,
+            foundTruffle: nextFoundTruffle,
+            hp: nextHp,
+          });
+          const nextBestTitle =
+            nextUnlockedRun.length > 0
+              ? nextUnlockedRun[nextUnlockedRun.length - 1].title
+              : '';
+          void submitLeaderboardScore({
+            user: firebaseUser,
+            score: nextScore,
+            turn: nextTurnNumber,
+            coins: nextCoins,
+            titleCount: nextUnlockedRun.length,
+            bestTitle: nextBestTitle,
+            foundTruffle: nextFoundTruffle,
+            customDisplayName: playerNickname,
+          }).catch(() => {
+            // Silent background sync failure; player can manually sync in LeaderboardModal
+          });
+        }
 
         // Audio cue based on outcome
         if (nextHp <= 0) {
@@ -344,23 +578,78 @@ export default function App() {
         setIsLoading(false);
       }
     },
-    [isLoading, stats, turn, logs, counters, runUnlocked, allUnlockedIds, fetchEpitaph]
+    [
+      isLoading,
+      stats,
+      turn,
+      logs,
+      counters,
+      runUnlocked,
+      allUnlockedIds,
+      foundTruffle,
+      firebaseUser,
+      playerNickname,
+      fetchEpitaph,
+    ]
   );
 
   const handleStartNewGame = () => {
+    if (isLoading) return;
     retroAudio.playClick();
     setStats(INITIAL_STATS);
     setTurn(0);
     setLogs([]);
     setCurrentChoices([]);
     setCurrentImagePrompt(INITIAL_IMAGE_PROMPT);
-    setCurrentStoryForScene('泥巴王國 泥漿大道 小豬準備出發');
+    setCurrentStoryForScene('泥巴王國 泥漿大道 小豬準備選擇天賦出發');
     setCustomAction('');
     setFoundTruffle(false);
     setGameOverSummary(null);
     setCounters(INITIAL_COUNTERS);
     setRunUnlocked([]);
-    executeTurn(true);
+    setCraftNotice(null);
+    setErrorMsg(null);
+    setLastFailedRequest(null);
+    setPhase('TALENT_SELECT');
+  };
+
+  const handleConfirmTalentAndStart = (talentId: TalentId) => {
+    if (isLoading) return;
+    const chosen = getTalentById(talentId);
+    const startingStats: PlayerStats = {
+      ...INITIAL_STATS,
+      talentId: chosen?.id ?? null,
+      modifiers: chosen?.modifiers ?? DEFAULT_TALENT_MODIFIERS,
+    };
+    retroAudio.playClick();
+    setStats(startingStats);
+    executeTurn(true, undefined, startingStats);
+  };
+
+  const handleLoadLastAdventure = () => {
+    if (isLoading) return;
+    const saved = loadSavedAdventure();
+    if (!saved) {
+      setHasSavedGame(false);
+      return;
+    }
+    retroAudio.playEquip();
+    setPhase(saved.phase);
+    setStats(saved.stats);
+    setTurn(saved.turn);
+    setLogs(saved.logs);
+    setCurrentChoices(saved.currentChoices);
+    setCurrentImagePrompt(saved.currentImagePrompt);
+    setCurrentStoryForScene(saved.currentStoryForScene);
+    setFoundTruffle(saved.foundTruffle);
+    setCounters(saved.counters);
+    setRunUnlocked(saved.runUnlocked);
+    setGameOverSummary(saved.gameOverSummary);
+    setCustomAction('');
+    setErrorMsg(null);
+    setLastFailedRequest(null);
+    setCraftNotice(null);
+    setSceneSeed((s) => s + 1);
   };
 
   const handleSelectItem = (itemName: string) => {
@@ -368,6 +657,26 @@ export default function App() {
     retroAudio.playEquip();
     setCustomAction(`使用 ${itemName}`);
     inputRef.current?.focus();
+  };
+
+  const handleCraftItems = (craft: AvailableCraft) => {
+    if (phase !== 'PLAYING' || isLoading) return;
+    const nextInventory = applyCrafting(stats.inventory, craft);
+    if (!nextInventory) return;
+    retroAudio.playAchievement();
+    setStats((prev) => ({
+      ...prev,
+      inventory: nextInventory,
+    }));
+    setCraftNotice(
+      `已將「${craft.itemA}」＋「${craft.itemB}」一鍵合成為「${craft.recipe.resultItem}」！`
+    );
+    if (
+      customAction.includes(craft.itemA) ||
+      customAction.includes(craft.itemB)
+    ) {
+      setCustomAction(`使用 ${craft.recipe.resultItem}`);
+    }
   };
 
   const handleSubmitCustomAction = (e: React.FormEvent) => {
@@ -379,7 +688,7 @@ export default function App() {
   // Keyboard shortcuts 1, 2, 3 for quick choices when not typing
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (phase !== 'PLAYING' || isLoading) return;
+      if (isLeaderboardOpen || phase !== 'PLAYING' || isLoading) return;
       const activeTag = document.activeElement?.tagName;
       if (activeTag === 'INPUT' || activeTag === 'TEXTAREA') return;
 
@@ -393,7 +702,7 @@ export default function App() {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [phase, isLoading, currentChoices, executeTurn]);
+  }, [isLeaderboardOpen, phase, isLoading, currentChoices, executeTurn]);
 
   const hpPercent = Math.round((stats.hp / stats.maxHp) * 100);
   const hungerPercent = Math.round((stats.hunger / stats.maxHunger) * 100);
@@ -412,7 +721,27 @@ export default function App() {
               泥巴王國：貪吃小豬大冒險
             </h1>
             <p className="text-xs text-[#c7b49a] flex flex-wrap items-center gap-x-2 gap-y-0.5">
-              <span>{phase === 'TITLE' ? '準備啟程' : `第 ${turn} 回合`}</span>
+              <span>
+                {phase === 'TITLE'
+                  ? '準備啟程'
+                  : phase === 'TALENT_SELECT'
+                  ? '選擇天賦'
+                  : `第 ${turn} 回合`}
+              </span>
+              {activeTalent && (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <span className="text-[#9fd67a]">
+                    天賦：{activeTalent.name}（{activeTalent.effectLabel}）
+                  </span>
+                </>
+              )}
+              {turn > 0 && (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <span className="font-num text-[#ffd95a]">積分 {currentScore}</span>
+                </>
+              )}
               {runUnlocked.length > 0 && (
                 <>
                   <span aria-hidden="true">·</span>
@@ -489,9 +818,22 @@ export default function App() {
           </div>
         </div>
 
-        {/* Zone 3: Install PWA, Sound & Start New Adventure */}
+        {/* Zone 3: Install PWA, Leaderboard, Sound & Start New Adventure */}
         <div className="flex items-center gap-2.5 shrink-0 flex-wrap">
           <PWAInstallButton />
+
+          <button
+            type="button"
+            onClick={() => {
+              retroAudio.playClick();
+              setIsLeaderboardOpen(true);
+            }}
+            className="pixel-btn bg-[#33251c] hover:bg-[#443125] text-[#ffd95a] px-3.5 py-2 text-sm font-medium flex items-center gap-2 whitespace-nowrap cursor-pointer"
+            title={firebaseUser ? `已登入：${firebaseUser.displayName || '冒險者'}` : '開啟英雄排行榜與玩家登入'}
+          >
+            <Trophy className="w-4 h-4 text-[#ffd95a]" />
+            <span>{firebaseUser ? '排行榜（已登入）' : '排行榜'}</span>
+          </button>
 
           <button
             type="button"
@@ -501,6 +843,17 @@ export default function App() {
             title={isMuted ? '開啟復古音效' : '靜音'}
           >
             {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4 text-[#f3b562]" />}
+          </button>
+
+          <button
+            type="button"
+            onClick={handleLoadLastAdventure}
+            disabled={!hasSavedGame || isLoading}
+            title={hasSavedGame ? '讀取上次自動儲存的冒險進度' : '尚無可載入的存檔'}
+            className="pixel-btn bg-[#33251c] hover:bg-[#443125] text-[#f5ebd9] px-3.5 py-2 text-sm font-medium flex items-center gap-2 whitespace-nowrap cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed"
+          >
+            <FolderOpen className="w-4 h-4 text-[#f3b562]" />
+            <span>載入上次冒險</span>
           </button>
 
           <button
@@ -556,6 +909,8 @@ export default function App() {
             <span className="text-xs text-[#b8a58d]">
               {phase === 'TITLE'
                 ? '等待小豬出發'
+                : phase === 'TALENT_SELECT'
+                ? '選擇開局天賦'
                 : phase === 'GAME_OVER'
                 ? '冒險結束'
                 : 'AI 地下城主即時敘事'}
@@ -581,8 +936,92 @@ export default function App() {
                   disabled={isLoading}
                   className="pixel-btn pixel-btn-primary px-6 py-3 font-pixel text-base cursor-pointer"
                 >
-                  {isLoading ? '正在召喚地下城主...' : '開始新冒險'}
+                  開始新冒險
                 </button>
+              </div>
+            )}
+
+            {phase === 'TALENT_SELECT' && (
+              <div className="pixel-panel-inner p-5 flex flex-col gap-4 my-2">
+                <div className="text-center space-y-1.5">
+                  <p className="text-xs text-[#f3b562] font-pixel">STEP 1 · 選擇小豬天賦</p>
+                  <h3 className="font-pixel text-lg text-[#ffd95a]">
+                    出發前，決定你的冒險專長！
+                  </h3>
+                  <p className="text-xs text-[#cbb89e]">
+                    不同天賦會直接調整小豬在冒險中的數值係數，選擇後即刻召喚地下城主。
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-1 gap-2.5">
+                  {TALENTS.map((talent) => {
+                    const isSelected = selectedTalentId === talent.id;
+                    return (
+                      <button
+                        key={talent.id}
+                        type="button"
+                        disabled={isLoading}
+                        onClick={() => {
+                          retroAudio.playClick();
+                          setSelectedTalentId(talent.id);
+                        }}
+                        className={`pixel-btn p-3.5 text-left flex items-start gap-3 cursor-pointer disabled:opacity-60 ${
+                          isSelected
+                            ? 'bg-[#3b2b18] border-[#ffd95a]'
+                            : 'bg-[#241a13] hover:bg-[#33241a]'
+                        }`}
+                      >
+                        <div className="pixel-panel-inner p-2 shrink-0 mt-0.5">
+                          {talent.id === 'glutton' ? (
+                            <PixelHungerIcon className="w-5 h-5" />
+                          ) : talent.id === 'fleet_foot' ? (
+                            <Zap className="w-5 h-5 text-[#7ce06b]" />
+                          ) : (
+                            <PixelCoinIcon className="w-5 h-5" />
+                          )}
+                        </div>
+                        <div className="min-w-0 flex-1 space-y-1">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex items-center gap-2">
+                              <span className="font-pixel text-sm text-[#ffd95a]">
+                                {talent.name}
+                              </span>
+                              <span className="text-xs text-[#f5ebd9]">· {talent.subtitle}</span>
+                            </div>
+                            <span className="font-num text-xs text-[#9fd67a]">
+                              {talent.effectLabel}
+                            </span>
+                          </div>
+                          <p className="text-xs text-[#d6c4ab] leading-relaxed">
+                            {talent.description}
+                          </p>
+                        </div>
+                        {isSelected && (
+                          <Check className="w-4 h-4 text-[#ffd95a] shrink-0 mt-1" />
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="flex items-center justify-center gap-3 pt-1">
+                  <button
+                    type="button"
+                    disabled={isLoading}
+                    onClick={() => setPhase('TITLE')}
+                    className="pixel-btn bg-[#33251c] hover:bg-[#443125] text-[#e0d2be] px-4 py-2.5 text-xs cursor-pointer disabled:opacity-50"
+                  >
+                    返回
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isLoading}
+                    onClick={() => handleConfirmTalentAndStart(selectedTalentId)}
+                    className="pixel-btn pixel-btn-primary px-6 py-2.5 font-pixel text-sm cursor-pointer disabled:opacity-60"
+                  >
+                    {isLoading ? '正在召喚地下城主...' : '確認天賦，踏出泥巴村！'}
+                  </button>
+                </div>
               </div>
             )}
 
@@ -726,6 +1165,12 @@ export default function App() {
                   </p>
                 )}
                 <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1 text-xs text-[#cbb89e] font-num">
+                  {activeTalent && (
+                    <>
+                      <span>天賦：{activeTalent.name}</span>
+                      <span>·</span>
+                    </>
+                  )}
                   <span>存活回合：{turn}</span>
                   <span>·</span>
                   <span>遺留豬豬幣：{stats.coins}</span>
@@ -733,19 +1178,34 @@ export default function App() {
                   <span>攜帶道具：{stats.inventory.length} 件</span>
                   <span>·</span>
                   <span>本局稱號：{runUnlocked.length} 個</span>
+                  <span>·</span>
+                  <span className="text-[#ffd95a] font-bold">最終積分：{currentScore}</span>
                 </div>
                 {runUnlocked.length > 0 && (
                   <p className="text-xs text-[#ffd95a]">
                     獲得稱號：{runUnlocked.map((a) => `「${a.title}」`).join('、')}
                   </p>
                 )}
-                <button
-                  type="button"
-                  onClick={handleStartNewGame}
-                  className="pixel-btn pixel-btn-primary px-6 py-2.5 font-pixel text-sm cursor-pointer"
-                >
-                  重新開始新冒險
-                </button>
+                <div className="flex flex-wrap items-center justify-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      retroAudio.playClick();
+                      setIsLeaderboardOpen(true);
+                    }}
+                    className="pixel-btn bg-[#33251c] hover:bg-[#443125] text-[#ffd95a] px-4 py-2.5 font-pixel text-sm flex items-center gap-2 cursor-pointer"
+                  >
+                    <Trophy className="w-4 h-4" />
+                    <span>查看排行榜 / 登錄積分</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleStartNewGame}
+                    className="pixel-btn pixel-btn-primary px-6 py-2.5 font-pixel text-sm cursor-pointer"
+                  >
+                    重新開始新冒險
+                  </button>
+                </div>
               </div>
             )}
 
@@ -817,8 +1277,49 @@ export default function App() {
             </div>
 
             <p className="text-xs text-[#b8a58d] leading-relaxed">
-              點擊道具可自動將「使用 [道具名稱]」填入下方輸入框。
+              點擊道具可帶入行動框；擁有特定材料時可點擊旁邊的「合成」按鈕一鍵組合。
             </p>
+
+            {craftNotice && (
+              <div className="pixel-panel-inner border-[#d99b26] px-3 py-2 text-xs text-[#ffd95a] leading-relaxed">
+                {craftNotice}
+              </div>
+            )}
+
+            {phase === 'PLAYING' && availableCrafts.length > 0 && (
+              <div className="pixel-panel-inner border-[#8f6a28] p-2.5 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[11px] font-bold text-[#ffd95a] flex items-center gap-1">
+                    <Hammer className="w-3.5 h-3.5 shrink-0" />
+                    <span>可一鍵合成配方</span>
+                  </span>
+                  <span className="font-num text-[11px] text-[#cbb89e]">
+                    {availableCrafts.length} 組
+                  </span>
+                </div>
+                <div className="space-y-1.5">
+                  {availableCrafts.map((craft) => (
+                    <div
+                      key={craft.recipe.id}
+                      className="flex items-center justify-between gap-2 text-xs bg-[#17110d] border border-[#3c2b1e] px-2.5 py-1.5"
+                    >
+                      <span className="text-[#e6d5b8] truncate">
+                        {craft.itemA} ＋ {craft.itemB} →{' '}
+                        <strong className="text-[#ffd95a]">{craft.recipe.resultItem}</strong>
+                      </span>
+                      <button
+                        type="button"
+                        disabled={isLoading}
+                        onClick={() => handleCraftItems(craft)}
+                        className="pixel-btn pixel-btn-primary px-2 py-1 text-[11px] font-bold whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+                      >
+                        一鍵合成
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {stats.inventory.length === 0 ? (
               <div className="pixel-panel-inner p-4 text-center text-xs text-[#9c8a74]">
@@ -826,25 +1327,52 @@ export default function App() {
               </div>
             ) : (
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 gap-2">
-                {stats.inventory.map((item, idx) => (
-                  <button
-                    key={`${item}-${idx}`}
-                    type="button"
-                    disabled={phase !== 'PLAYING' || isLoading}
-                    onClick={() => handleSelectItem(item)}
-                    className="pixel-btn bg-[#2c2018] hover:bg-[#3f2e22] px-3 py-2.5 flex items-center gap-3 text-left cursor-pointer disabled:opacity-55"
-                  >
-                    <div className="pixel-panel-inner p-1.5 shrink-0">
-                      <PixelItemIcon itemName={item} className="w-6 h-6" />
+                {stats.inventory.map((item, idx) => {
+                  const craftForItem =
+                    phase === 'PLAYING' ? craftByInventoryIndex.get(idx) : undefined;
+                  const partnerName = craftForItem
+                    ? craftForItem.indexA === idx
+                      ? craftForItem.itemB
+                      : craftForItem.itemA
+                    : null;
+
+                  return (
+                    <div key={`${item}-${idx}`} className="flex items-stretch gap-1.5">
+                      <button
+                        type="button"
+                        disabled={phase !== 'PLAYING' || isLoading}
+                        onClick={() => handleSelectItem(item)}
+                        className="pixel-btn bg-[#2c2018] hover:bg-[#3f2e22] px-3 py-2.5 flex items-center gap-3 text-left flex-1 min-w-0 cursor-pointer disabled:opacity-55"
+                      >
+                        <div className="pixel-panel-inner p-1.5 shrink-0">
+                          <PixelItemIcon itemName={item} className="w-6 h-6" />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="text-sm font-medium text-[#f5ebd9] truncate">
+                            {item}
+                          </div>
+                          <div className="text-[11px] text-[#b8a58d] truncate">
+                            {partnerName ? `可與「${partnerName}」合成` : '點擊填入使用'}
+                          </div>
+                        </div>
+                      </button>
+
+                      {craftForItem && (
+                        <button
+                          type="button"
+                          disabled={isLoading}
+                          onClick={() => handleCraftItems(craftForItem)}
+                          title={`與「${partnerName}」一鍵合成為「${craftForItem.recipe.resultItem}」`}
+                          aria-label={`將 ${craftForItem.itemA} 與 ${craftForItem.itemB} 合成為 ${craftForItem.recipe.resultItem}`}
+                          className="pixel-btn bg-[#4a3214] hover:bg-[#61421a] border-[#d99b26] text-[#ffd95a] px-2.5 py-2 text-xs font-bold flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+                        >
+                          <Hammer className="w-3.5 h-3.5 shrink-0" />
+                          <span>合成</span>
+                        </button>
+                      )}
                     </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="text-sm font-medium text-[#f5ebd9] truncate">
-                        {item}
-                      </div>
-                      <div className="text-[11px] text-[#b8a58d]">點擊填入使用</div>
-                    </div>
-                  </button>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -894,6 +1422,19 @@ export default function App() {
           </div>
         </aside>
       </main>
+      <LeaderboardModal
+        isOpen={isLeaderboardOpen}
+        onClose={() => setIsLeaderboardOpen(false)}
+        user={firebaseUser}
+        playerNickname={playerNickname}
+        onNicknameChange={handleNicknameChange}
+        currentScore={currentScore}
+        turn={turn}
+        coins={stats.coins}
+        titleCount={runUnlocked.length}
+        bestTitle={bestTitle}
+        foundTruffle={foundTruffle}
+      />
       <OfflineIndicator />
     </div>
   );

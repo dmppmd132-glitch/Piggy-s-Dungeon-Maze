@@ -1,0 +1,114 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidLeaderboardEntry(data) {
+      return data.keys().hasAll([
+          'uid',
+          'displayName',
+          'score',
+          'turn',
+          'coins',
+          'titleCount',
+          'bestTitle',
+          'foundTruffle',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid',
+          'displayName',
+          'score',
+          'turn',
+          'coins',
+          'titleCount',
+          'bestTitle',
+          'foundTruffle',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.uid is string
+        && data.uid == request.auth.uid
+        && data.uid.size() >= 1
+        && data.uid.size() <= 128
+        && data.uid.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.displayName is string
+        && data.displayName.size() >= 1
+        && data.displayName.size() <= 40
+        && data.score is int
+        && data.score >= 0
+        && data.score <= 1000000
+        && data.turn is int
+        && data.turn >= 1
+        && data.turn <= 10000
+        && data.coins is int
+        && data.coins >= 0
+        && data.coins <= 100000
+        && data.titleCount is int
+        && data.titleCount >= 0
+        && data.titleCount <= 20
+        && data.bestTitle is string
+        && data.bestTitle.size() <= 40
+        && data.foundTruffle is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    match /leaderboard/{userId} {
+      allow get: if isValidId(userId);
+      allow list: if resource.data.score >= 0 && request.query.limit <= 25;
+
+      allow create: if isVerifiedUser()
+        && isValidId(userId)
+        && userId == request.auth.uid
+        && isValidLeaderboardEntry(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isVerifiedUser()
+        && isValidId(userId)
+        && userId == request.auth.uid
+        && isValidLeaderboardEntry(incoming())
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().score >= existing().score
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'displayName',
+          'score',
+          'turn',
+          'coins',
+          'titleCount',
+          'bestTitle',
+          'foundTruffle',
+          'updatedAt'
+        ]);
+
+      allow delete: if false;
+    }
+  }
+}

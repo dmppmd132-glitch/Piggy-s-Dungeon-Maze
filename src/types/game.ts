@@ -1,4 +1,12 @@
-export type GamePhase = 'TITLE' | 'PLAYING' | 'GAME_OVER';
+export type GamePhase = 'TITLE' | 'TALENT_SELECT' | 'PLAYING' | 'GAME_OVER';
+
+export type TalentId = 'glutton' | 'fleet_foot' | 'lucky_star';
+
+export interface TalentModifiers {
+  foodGainMultiplier: number;
+  hungerDrainMultiplier: number;
+  coinGainMultiplier: number;
+}
 
 export interface PlayerStats {
   hp: number;
@@ -7,6 +15,8 @@ export interface PlayerStats {
   maxHunger: number;
   coins: number;
   inventory: string[];
+  talentId: TalentId | null;
+  modifiers: TalentModifiers;
 }
 
 export interface DmTurnResponse {

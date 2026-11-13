@@ -1,0 +1,78 @@
+{
+  "entities": {
+    "LeaderboardEntry": {
+      "title": "LeaderboardEntry",
+      "description": "Public high-score entry for a signed-in Mud Kingdom RPG player.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "maxLength": 128,
+          "description": "Firebase Auth UID of the player."
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40,
+          "description": "Public display nickname shown on the leaderboard."
+        },
+        "score": {
+          "type": "integer",
+          "description": "Personal best adventure score."
+        },
+        "turn": {
+          "type": "integer",
+          "description": "Turns survived in the best run."
+        },
+        "coins": {
+          "type": "integer",
+          "description": "Coins collected in the best run."
+        },
+        "titleCount": {
+          "type": "integer",
+          "description": "Number of hidden titles unlocked in the best run."
+        },
+        "bestTitle": {
+          "type": "string",
+          "maxLength": 40,
+          "description": "Representative unlocked hidden title."
+        },
+        "foundTruffle": {
+          "type": "boolean",
+          "description": "Whether the player found the Golden Black Truffle in the best run."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server last-update timestamp."
+        }
+      },
+      "required": [
+        "uid",
+        "displayName",
+        "score",
+        "turn",
+        "coins",
+        "titleCount",
+        "bestTitle",
+        "foundTruffle",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/leaderboard/{userId}": {
+      "schema": {
+        "$ref": "#/entities/LeaderboardEntry"
+      },
+      "description": "Stores each authenticated player's personal best leaderboard score."
+    }
+  }
+}

@@ -213,7 +213,13 @@ export const PixelItemIcon: React.FC<{ itemName: string; className?: string }> =
     );
   }
 
-  if (lower.includes('藥') || lower.includes('水') || lower.includes('汁') || lower.includes('酒')) {
+  if (
+    lower.includes('藥') ||
+    lower.includes('水') ||
+    lower.includes('汁') ||
+    lower.includes('酒') ||
+    lower.includes('瓶')
+  ) {
     return (
       <svg viewBox="0 0 16 16" shapeRendering="crispEdges" className={className} aria-hidden="true">
         <rect x="6" y="2" width="4" height="2" fill="#9c6b43" />
@@ -237,7 +243,13 @@ export const PixelItemIcon: React.FC<{ itemName: string; className?: string }> =
     );
   }
 
-  if (lower.includes('鍋') || lower.includes('劍') || lower.includes('棒') || lower.includes('盾')) {
+  if (
+    lower.includes('鍋') ||
+    lower.includes('劍') ||
+    lower.includes('棒') ||
+    lower.includes('盾') ||
+    lower.includes('槌')
+  ) {
     return (
       <svg viewBox="0 0 16 16" shapeRendering="crispEdges" className={className} aria-hidden="true">
         <rect x="10" y="2" width="3" height="3" fill="#b0bec5" />
