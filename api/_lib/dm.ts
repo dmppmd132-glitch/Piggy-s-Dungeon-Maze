@@ -35,7 +35,10 @@ export const DM_SYSTEM_INSTRUCTION = `你是奇幻文字 RPG《泥巴王國》�
    - new_item：獲得的單一新物品名稱（繁體中文，簡潔有梗，如「蒜香烤松露」、「哥布林平底鍋」），沒有則回傳 null。
    - lost_item：消耗、吃掉或被搶走的背包現有物品名稱（必須與玩家背包現有物品名稱完全一致），沒有則回傳 null。
 4. choices：剛好 3 個符合當前情境的繁體中文行動選項，分別以「A. 」、「B. 」、「C. 」開頭，風格要有區別（例如：勇敢衝撞、貪吃試探、機智嘴砲/裝死）。
-5. image_prompt：12-25 字的英文簡短場景描述，必須包含關鍵字 "cute pixel art, fantasy RPG style, 16-bit"，並具體寫出場景地點（如 mud village, magic forest, goblin kitchen, wolf ambush, truffle cavern, campfire）、出現的 NPC 或物件與小豬正在做的動作。`;
+5. image_prompt：12-25 字的英文簡短場景描述，必須包含關鍵字 "cute pixel art, fantasy RPG style, 16-bit"，並具體寫出場景地點（如 mud village, magic forest, goblin kitchen, wolf ambush, truffle cavern, campfire）、出現的 NPC 或物件與小豬正在做的動作。
+6. NPC 好感度互動：
+   - interacted_npc：若本回合劇情有與泥巴王國 NPC 互動（如「哥布林大廚「鍋蓋」」、「迷糊松鼠郵差「栗子」」、「老烏龜村長「慢吞吞」」、「泥巴獾商人「亮晶晶」」、「失眠貓頭鷹學者「咕嚕」」），請回傳其名稱，無則回傳 null。
+   - affinity_change：因互動產生的好感度變化整數（友善幫忙、分享食物、禮貌交易為 +4 到 +15；冒犯、偷搶、攻擊為 -15 到 -4；無則回傳 0）。若該 NPC 好感度高（友善夥伴或莫逆之交），交易時應主動給予折扣，並可在對話中主動透露實用的冒險線索。`;
 
 const dmTurnSchema = {
   type: Type.OBJECT,
@@ -76,6 +79,15 @@ const dmTurnSchema = {
       description:
         'Short English prompt describing the current scene, characters, and piglet action. Must include: cute pixel art, fantasy RPG style, 16-bit',
     },
+    interacted_npc: {
+      type: Type.STRING,
+      nullable: true,
+      description: '本回合主要互動的 NPC 名稱，若無明確 NPC 互動則為 null。',
+    },
+    affinity_change: {
+      type: Type.INTEGER,
+      description: '與該 NPC 的好感度增減值（整數，無互動則為 0）。',
+    },
   },
   required: [
     'story',
@@ -86,6 +98,8 @@ const dmTurnSchema = {
     'lost_item',
     'choices',
     'image_prompt',
+    'interacted_npc',
+    'affinity_change',
   ],
 };
 
@@ -154,6 +168,12 @@ export interface TurnRequestBody {
     itemDiscoveryBonusPercent: number;
     hungerReductionPercent: number;
   } | null;
+  npcAffinities?: Array<{
+    name: string;
+    affinity: number;
+    tierLabel: string;
+    perkLabel: string;
+  }> | null;
 }
 
 export interface EpitaphRequestBody {
@@ -270,6 +290,13 @@ export async function generateDmTurn(body: TurnRequestBody) {
       }`
     : '';
 
+  const npcAffinitiesText =
+    Array.isArray(body.npcAffinities) && body.npcAffinities.length > 0
+      ? `- 泥巴王國 NPC 好感度：\n${body.npcAffinities
+          .map((n) => `  · ${n.name}：${n.affinity}/100（${n.tierLabel}，${n.perkLabel}）`)
+          .join('\n')}\n（提示：若與「友善夥伴」或「莫逆之交」的 NPC 交易或對話，請在劇情中給予折扣或讓 NPC 主動分享尋找松露／道具的冒險線索！）`
+      : '';
+
   const userPrompt = isStart
     ? `【開始新冒險 - 第 1 回合】
 小豬主角目前狀態：
@@ -279,6 +306,7 @@ export async function generateDmTurn(body: TurnRequestBody) {
 - 背包物品: ${stats.inventory.join('、') || '空無一物'}
 ${equipmentText}
 ${skillText}
+${npcAffinitiesText}
 ${worldCyclePrompt}
 請撰寫泥巴王國冒險的開場第一回合！小豬剛帶著「生鏽的木湯匙」和「半顆蘋果」離開泥巴村莊，準備去尋找傳說中的「黃金黑松露」，並在路上遇到第一個有趣的森林奇遇或角色。記住第一回合所有數值變化皆為 0，new_item 與 lost_item 皆為 null。`
     : `【第 ${turn} 回合】
@@ -292,6 +320,7 @@ ${historySummary}
 - 背包物品: ${stats.inventory.join('、') || '空無一物'}
 ${equipmentText}
 ${skillText}
+${npcAffinitiesText}
 ${worldCyclePrompt}${randomEventPrompt}${questPrompt}
 本回合玩家的行動：「${action}」
 
@@ -351,6 +380,10 @@ ${worldCyclePrompt}${randomEventPrompt}${questPrompt}
         lost_item: isStart ? null : normalizeNullableItem(parsed.lost_item),
         choices: choices as [string, string, string],
         image_prompt: imagePrompt,
+        interacted_npc: isStart ? null : normalizeNullableItem(parsed.interacted_npc),
+        affinity_change: isStart
+          ? 0
+          : Math.max(-25, Math.min(25, Math.trunc(Number(parsed.affinity_change) || 0))),
       },
     };
   } catch (error) {

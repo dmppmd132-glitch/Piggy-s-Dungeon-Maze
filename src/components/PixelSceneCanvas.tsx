@@ -199,10 +199,10 @@ export const PixelSceneCanvas: React.FC<PixelSceneCanvasProps> = React.memo(({
     seasonId === 'winter' ? '#dbe8f5' : seasonId === 'autumn' ? '#f5b041' : '#f7e3a1';
 
   return (
-    <div className="pixel-panel p-3 flex flex-col gap-3">
+    <div className="pixel-panel p-2.5 sm:p-3 flex flex-col gap-2 sm:gap-3">
       <div className="flex items-center justify-between gap-2">
         <div className="min-w-0">
-          <h2 className="font-pixel text-sm text-[#f5ebd9] tracking-wide truncate">
+          <h2 className="font-pixel text-xs sm:text-sm text-[#f5ebd9] tracking-wide truncate">
             {scene.label}
           </h2>
         </div>
@@ -218,7 +218,7 @@ export const PixelSceneCanvas: React.FC<PixelSceneCanvasProps> = React.memo(({
       </div>
 
       {/* 16-bit Pixel Viewport */}
-      <div className="pixel-panel-inner relative overflow-hidden aspect-[16/10] w-full">
+      <div className="pixel-panel-inner relative overflow-hidden aspect-[16/8.5] sm:aspect-[16/10] w-full">
         <svg
           viewBox="0 0 160 100"
           shapeRendering="crispEdges"
@@ -527,8 +527,8 @@ export const PixelSceneCanvas: React.FC<PixelSceneCanvasProps> = React.memo(({
         </svg>
       </div>
 
-      {/* Image Prompt Caption */}
-      <div className="text-xs text-[#b8a58d] leading-relaxed flex items-start gap-2">
+      {/* Image Prompt Caption (hidden on compact mobile screens to preserve vertical play space) */}
+      <div className="hidden sm:flex text-xs text-[#b8a58d] leading-relaxed items-start gap-2">
         <Sparkles className="w-3.5 h-3.5 text-[#f3b562] shrink-0 mt-0.5" />
         <p className="line-clamp-2 font-mono text-[11px] text-[#cbb89e]">
           {imagePrompt}

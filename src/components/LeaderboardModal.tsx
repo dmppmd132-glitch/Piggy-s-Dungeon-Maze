@@ -152,21 +152,21 @@ export const LeaderboardModal: React.FC<LeaderboardModalProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-2.5 sm:p-4 pb-safe"
       role="dialog"
       aria-modal="true"
       aria-labelledby="leaderboard-modal-title"
     >
-      <div className="pixel-panel w-full max-w-2xl max-h-[88vh] flex flex-col gap-4 p-5">
+      <div className="pixel-panel w-full max-w-2xl max-h-[88dvh] flex flex-col gap-3 sm:gap-4 p-3.5 sm:p-5">
         {/* Modal Header */}
-        <div className="flex items-center justify-between gap-3 border-b-2 border-[#4a3525] pb-3">
-          <div className="flex items-center gap-2.5">
+        <div className="flex items-center justify-between gap-2 border-b-2 border-[#4a3525] pb-2.5 sm:pb-3">
+          <div className="flex items-center gap-2 min-w-0">
             <PixelTrophyIcon className="w-6 h-6 shrink-0" />
-            <div>
-              <h2 id="leaderboard-modal-title" className="font-pixel text-lg text-[#ffd95a]">
+            <div className="min-w-0">
+              <h2 id="leaderboard-modal-title" className="font-pixel text-base sm:text-lg text-[#ffd95a] truncate">
                 泥巴王國英雄排行榜
               </h2>
-              <p className="text-xs text-[#b8a58d]">
+              <p className="text-[11px] sm:text-xs text-[#b8a58d] leading-snug">
                 積分計算：回合 × 25 + 豬豬幣 × 3 + 隱藏稱號 × 100 + 剩餘 HP（尋獲黃金黑松露 +500）
               </p>
             </div>
@@ -174,7 +174,7 @@ export const LeaderboardModal: React.FC<LeaderboardModalProps> = ({
           <button
             type="button"
             onClick={onClose}
-            className="pixel-btn bg-[#33251c] hover:bg-[#443125] p-2 text-[#f5ebd9] cursor-pointer shrink-0"
+            className="pixel-btn bg-[#33251c] hover:bg-[#443125] min-w-[44px] min-h-[44px] flex items-center justify-center text-[#f5ebd9] cursor-pointer shrink-0"
             aria-label="關閉排行榜"
           >
             <X className="w-4 h-4" />
@@ -253,13 +253,13 @@ export const LeaderboardModal: React.FC<LeaderboardModalProps> = ({
                 maxLength={40}
                 value={draftName}
                 onChange={(e) => setDraftName(e.target.value)}
-                placeholder={user?.displayName || '輸入你想顯示在排行榜的暱稱（最多 40 字）'}
-                className="flex-1 min-w-0 bg-[#140e0b] border border-[#4a3525] px-2.5 py-1.5 text-xs text-[#f5ebd9] placeholder-[#7d6c58] focus:outline-none focus:border-[#f3b562]"
+                placeholder={user?.displayName || '輸入你想顯示的暱稱（最多 40 字）'}
+                className="flex-1 min-w-0 bg-[#140e0b] border border-[#4a3525] px-2.5 py-2 text-base sm:text-xs text-[#f5ebd9] placeholder-[#7d6c58] focus:outline-none focus:border-[#f3b562]"
               />
               <button
                 type="submit"
                 disabled={savingName}
-                className="pixel-btn bg-[#33251c] hover:bg-[#443125] text-[#ffd95a] px-3 py-1.5 text-xs font-medium flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+                className="pixel-btn bg-[#33251c] hover:bg-[#443125] text-[#ffd95a] px-3 min-h-[40px] sm:min-h-0 py-1.5 text-xs font-medium flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
               >
                 <Check className="w-3.5 h-3.5" />
                 <span>{savingName ? '套用中...' : '套用名稱'}</span>

@@ -60,6 +60,8 @@ export interface DmTurnResponse {
   lost_item: string | null;
   choices: [string, string, string];
   image_prompt: string;
+  interacted_npc?: string | null;
+  affinity_change?: number;
 }
 
 export interface AppliedDeltas {
@@ -136,6 +138,23 @@ export interface LevelUpInfo {
   gainedPoints: number;
 }
 
+export type NpcId =
+  | 'goblin_chef'
+  | 'squirrel_postman'
+  | 'turtle_mayor'
+  | 'badger_merchant'
+  | 'owl_scholar';
+
+export interface NpcAffinityEvent {
+  npcId: NpcId;
+  npcName: string;
+  delta: number;
+  newAffinity: number;
+  tierLabel: string;
+  discountCoinsSaved: number;
+  proactiveClue: string | null;
+}
+
 export interface LogEntry {
   id: string;
   turn: number;
@@ -151,6 +170,7 @@ export interface LogEntry {
   questEvent?: QuestLogEvent | null;
   levelUp?: LevelUpInfo | null;
   bonusForagedItem?: string | null;
+  npcAffinityEvent?: NpcAffinityEvent | null;
 }
 
 export interface GameOverSummary {

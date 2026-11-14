@@ -10,6 +10,7 @@ import {
   Gift,
   GitBranch,
   Hammer,
+  Heart,
   Moon,
   RotateCcw,
   ScrollText,
@@ -100,6 +101,17 @@ import {
   rollSkillBonusForageItem,
   SKILL_BRANCHES,
 } from './utils/skillTree';
+import {
+  calculateTradeDiscountSavings,
+  createInitialNpcAffinities,
+  getAffinityTier,
+  inferFallbackAffinityDelta,
+  matchNpcFromText,
+  MUD_KINGDOM_NPCS,
+  normalizeNpcAffinities,
+  pickNpcClue,
+  type NpcAffinityMap,
+} from './utils/npcAffinity';
 import type {
   AchievementCounters,
   ActiveQuest,
@@ -110,6 +122,7 @@ import type {
   GamePhase,
   LevelUpInfo,
   LogEntry,
+  NpcAffinityEvent,
   PlayerStats,
   QuestLogEvent,
   SkillId,
@@ -170,6 +183,7 @@ interface SavedAdventureState {
   gameOverSummary: GameOverSummary | null;
   activeQuest?: ActiveQuest | null;
   completedQuestIds?: string[];
+  npcAffinities?: NpcAffinityMap;
   savedAt: string;
 }
 
@@ -232,6 +246,7 @@ function loadSavedAdventure(): SavedAdventureState | null {
       gameOverSummary: parsed.gameOverSummary ?? null,
       activeQuest: parsed.activeQuest ?? null,
       completedQuestIds: Array.isArray(parsed.completedQuestIds) ? parsed.completedQuestIds : [],
+      npcAffinities: normalizeNpcAffinities(parsed.npcAffinities),
       savedAt: typeof parsed.savedAt === 'string' ? parsed.savedAt : '',
     };
   } catch {
@@ -278,6 +293,12 @@ export default function App() {
   const [selectedTalentId, setSelectedTalentId] = useState<TalentId>('glutton');
   const [activeQuest, setActiveQuest] = useState<ActiveQuest | null>(null);
   const [completedQuestIds, setCompletedQuestIds] = useState<string[]>([]);
+  const [npcAffinities, setNpcAffinities] = useState<NpcAffinityMap>(() =>
+    createInitialNpcAffinities()
+  );
+  const [mobileTab, setMobileTab] = useState<'adventure' | 'bag' | 'social' | 'progress'>(
+    'adventure'
+  );
 
   const handleNicknameChange = useCallback((name: string) => {
     const saved = saveNickname(name);
@@ -312,6 +333,7 @@ export default function App() {
         gameOverSummary,
         activeQuest,
         completedQuestIds,
+        npcAffinities,
         savedAt: new Date().toISOString(),
       };
       window.localStorage.setItem(SAVE_GAME_KEY, JSON.stringify(payload));
@@ -333,6 +355,7 @@ export default function App() {
     gameOverSummary,
     activeQuest,
     completedQuestIds,
+    npcAffinities,
   ]);
 
   useEffect(() => {
@@ -508,6 +531,18 @@ export default function App() {
         .map((id) => getSkillById(id)?.name)
         .filter((n): n is string => Boolean(n));
 
+      const baseAffinities = isStart ? createInitialNpcAffinities() : npcAffinities;
+      const npcAffinitiesPayload = MUD_KINGDOM_NPCS.map((npc) => {
+        const score = baseAffinities[npc.id] ?? npc.initialAffinity;
+        const tier = getAffinityTier(score);
+        return {
+          name: npc.name,
+          affinity: score,
+          tierLabel: tier.label,
+          perkLabel: tier.perkLabel,
+        };
+      });
+
       const historyPayload = isStart
         ? []
         : logs.slice(-4).map((l) => ({
@@ -555,6 +590,7 @@ export default function App() {
               itemDiscoveryBonusPercent: Math.round(turnSkillMods.itemDiscoveryBonus * 100),
               hungerReductionPercent: Math.round((1 - turnSkillMods.hungerDrainMultiplier) * 100),
             },
+            npcAffinities: npcAffinitiesPayload,
           }),
         });
 
@@ -645,7 +681,19 @@ export default function App() {
         const nextHp = clamp(baseStats.hp + totalHpDelta, 0, baseStats.maxHp);
         const appliedHpChange = nextHp - baseStats.hp;
 
-        let rawCoinsDelta = isStart ? 0 : dm.coins_change;
+        // Match NPC interaction & apply high-affinity trade discount / clues
+        const matchedNpc = !isStart
+          ? matchNpcFromText(dm.interacted_npc, cleanAction, dm.story)
+          : null;
+        const currentMatchedAffinity = matchedNpc
+          ? baseAffinities[matchedNpc.id] ?? matchedNpc.initialAffinity
+          : 0;
+        const discountCoinsSaved =
+          !isStart && matchedNpc && dm.coins_change < 0
+            ? calculateTradeDiscountSavings(dm.coins_change, currentMatchedAffinity)
+            : 0;
+
+        let rawCoinsDelta = isStart ? 0 : dm.coins_change + discountCoinsSaved;
         if (!isStart && rawCoinsDelta > 0 && equipBonuses.coinBonus > 0) {
           rawCoinsDelta += equipBonuses.coinBonus;
         }
@@ -756,6 +804,45 @@ export default function App() {
           }
         }
 
+        // Resolve NPC Affinity Delta & Proactive Clue
+        let nextNpcAffinities: NpcAffinityMap = { ...baseAffinities };
+        let turnAffinityEvent: NpcAffinityEvent | null = null;
+        if (!isStart) {
+          const questNpc = turnQuestEvent ? matchNpcFromText(turnQuestEvent.npcName) : null;
+          const targetNpc = questNpc ?? matchedNpc;
+
+          if (targetNpc) {
+            let delta = typeof dm.affinity_change === 'number' ? dm.affinity_change : 0;
+            if (turnQuestEvent?.type === 'completed') {
+              delta = Math.max(delta, 20);
+            } else if (turnQuestEvent?.type === 'accepted') {
+              delta = Math.max(delta, 5);
+            } else if (delta === 0) {
+              delta = inferFallbackAffinityDelta(cleanAction, dm.story);
+            }
+
+            const prevScore = nextNpcAffinities[targetNpc.id] ?? targetNpc.initialAffinity;
+            const updatedScore = clamp(prevScore + delta, 0, 100);
+            const appliedDelta = updatedScore - prevScore;
+            nextNpcAffinities[targetNpc.id] = updatedScore;
+
+            const tier = getAffinityTier(updatedScore);
+            const proactiveClue = pickNpcClue(targetNpc, updatedScore, cleanAction);
+
+            if (appliedDelta !== 0 || discountCoinsSaved > 0 || proactiveClue) {
+              turnAffinityEvent = {
+                npcId: targetNpc.id,
+                npcName: targetNpc.name,
+                delta: appliedDelta,
+                newAffinity: updatedScore,
+                tierLabel: tier.label,
+                discountCoinsSaved,
+                proactiveClue,
+              };
+            }
+          }
+        }
+
         // Skill Tree passive item discovery bonus (Foraging Branch)
         const bonusForagedItem = !isStart
           ? rollSkillBonusForageItem(
@@ -851,6 +938,7 @@ export default function App() {
           questEvent: turnQuestEvent,
           levelUp: turnLevelUp,
           bonusForagedItem,
+          npcAffinityEvent: turnAffinityEvent,
         };
 
         const nextUnlockedRun = isStart
@@ -867,6 +955,7 @@ export default function App() {
         setRunUnlocked(nextUnlockedRun);
         setActiveQuest(nextActiveQuest);
         setCompletedQuestIds(nextCompletedQuestIds);
+        setNpcAffinities(nextNpcAffinities);
         if (newlyUnlocked.length > 0) {
           const mergedIds = Array.from(
             new Set([...allUnlockedIds, ...newlyUnlocked.map((a) => a.id)])
@@ -950,6 +1039,7 @@ export default function App() {
       foundTruffle,
       activeQuest,
       completedQuestIds,
+      npcAffinities,
       firebaseUser,
       playerNickname,
       fetchEpitaph,
@@ -972,11 +1062,13 @@ export default function App() {
     setRunUnlocked([]);
     setActiveQuest(null);
     setCompletedQuestIds([]);
+    setNpcAffinities(createInitialNpcAffinities());
     setCraftNotice(null);
     setEquipNotice(null);
     setSkillNotice(null);
     setErrorMsg(null);
     setLastFailedRequest(null);
+    setMobileTab('adventure');
     setPhase('TALENT_SELECT');
   };
 
@@ -990,6 +1082,7 @@ export default function App() {
     };
     retroAudio.playClick();
     setStats(startingStats);
+    setMobileTab('adventure');
     executeTurn(true, undefined, startingStats);
   };
 
@@ -1014,12 +1107,14 @@ export default function App() {
     setGameOverSummary(saved.gameOverSummary);
     setActiveQuest(saved.activeQuest ?? null);
     setCompletedQuestIds(saved.completedQuestIds ?? []);
+    setNpcAffinities(normalizeNpcAffinities(saved.npcAffinities));
     setCustomAction('');
     setErrorMsg(null);
     setLastFailedRequest(null);
     setCraftNotice(null);
     setEquipNotice(null);
     setSkillNotice(null);
+    setMobileTab('adventure');
     setSceneSeed((s) => s + 1);
   };
 
@@ -1049,7 +1144,8 @@ export default function App() {
     if (phase !== 'PLAYING' || isLoading) return;
     retroAudio.playEquip();
     setCustomAction(`使用 ${itemName}`);
-    inputRef.current?.focus();
+    setMobileTab('adventure');
+    window.setTimeout(() => inputRef.current?.focus(), 40);
   };
 
   const handleEquipItem = (inventoryIndex: number, slot: EquipSlot) => {
@@ -1170,9 +1266,179 @@ export default function App() {
   );
 
   return (
-    <div className="min-h-screen flex flex-col max-w-[1400px] mx-auto px-3 sm:px-6 py-4 gap-4">
+    <div className="min-h-[100dvh] flex flex-col max-w-[1400px] mx-auto px-2.5 sm:px-6 pt-2.5 pt-safe pb-24 lg:py-4 gap-2.5 sm:gap-4">
       {/* TOP STATUS BAR */}
-      <header className="pixel-panel px-4 py-3 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+      <header className="pixel-panel px-2.5 py-2.5 sm:px-4 sm:py-3 flex flex-col gap-2.5 lg:flex-row lg:items-center lg:justify-between lg:gap-4">
+        {/* MOBILE COMPACT HUD (< lg, tuned for iPhone 15 393px width) */}
+        <div className="flex flex-col gap-2 lg:hidden">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <div className="pixel-panel-inner p-0.5 shrink-0">
+                <PigPortrait mood={pigMood} className="w-9 h-9" />
+              </div>
+              <div className="min-w-0">
+                <h1 className="font-pixel text-sm text-[#f5ebd9] tracking-wide truncate">
+                  泥巴王國：小豬大冒險
+                </h1>
+                <div className="text-[11px] text-[#c7b49a] flex items-center gap-1.5 font-num truncate">
+                  <span>
+                    {phase === 'TITLE'
+                      ? '準備啟程'
+                      : phase === 'TALENT_SELECT'
+                      ? '選天賦'
+                      : `R${turn}`}
+                  </span>
+                  {turn > 0 && (
+                    <>
+                      <span aria-hidden="true">·</span>
+                      <span className="text-[#7ce06b]">
+                        Lv.{stats.level}
+                        {stats.skillPoints > 0 ? `+${stats.skillPoints}` : ''}
+                      </span>
+                    </>
+                  )}
+                  <span aria-hidden="true">·</span>
+                  <span className="flex items-center gap-1 text-[#f5ebd9]">
+                    {worldCycle.timeId === 'night' ? (
+                      <Moon className="w-3 h-3 text-[#9bd8fa] shrink-0" />
+                    ) : worldCycle.timeId === 'dusk' ? (
+                      <Sunset className="w-3 h-3 text-[#f59d56] shrink-0" />
+                    ) : worldCycle.timeId === 'day' ? (
+                      <Sun className="w-3 h-3 text-[#ffd95a] shrink-0" />
+                    ) : (
+                      <Sunrise className="w-3 h-3 text-[#f3b562] shrink-0" />
+                    )}
+                    <span>{worldCycle.shortStatus}</span>
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={() => {
+                  retroAudio.playClick();
+                  setIsLeaderboardOpen(true);
+                }}
+                aria-label="開啟排行榜"
+                title="排行榜"
+                className="pixel-btn bg-[#33251c] hover:bg-[#443125] text-[#ffd95a] w-10 h-10 flex items-center justify-center cursor-pointer"
+              >
+                <Trophy className="w-4 h-4" />
+              </button>
+              <button
+                type="button"
+                onClick={toggleMute}
+                aria-label={isMuted ? '開啟音效' : '靜音'}
+                title={isMuted ? '開啟音效' : '靜音'}
+                className="pixel-btn bg-[#33251c] hover:bg-[#443125] text-[#f5ebd9] w-10 h-10 flex items-center justify-center cursor-pointer"
+              >
+                {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4 text-[#f3b562]" />}
+              </button>
+              <button
+                type="button"
+                onClick={handleLoadLastAdventure}
+                disabled={!hasSavedGame || isLoading}
+                aria-label="載入上次冒險"
+                title={hasSavedGame ? '載入上次冒險' : '尚無存檔'}
+                className="pixel-btn bg-[#33251c] hover:bg-[#443125] text-[#f3b562] w-10 h-10 flex items-center justify-center cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed"
+              >
+                <FolderOpen className="w-4 h-4" />
+              </button>
+              <button
+                type="button"
+                onClick={handleStartNewGame}
+                disabled={isLoading}
+                aria-label="開始新冒險"
+                title="開始新冒險"
+                className="pixel-btn pixel-btn-primary w-10 h-10 flex items-center justify-center cursor-pointer disabled:opacity-60"
+              >
+                <RotateCcw className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+
+          {/* 3-Column Compact Vital Strip for iPhone 15 */}
+          <div className="grid grid-cols-3 gap-1.5">
+            <div className="pixel-panel-inner px-2 py-1.5 flex flex-col gap-1">
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="flex items-center gap-1 text-[#f5ebd9]">
+                  <PixelHeartIcon className="w-3.5 h-3.5 shrink-0" />
+                  <span>生命</span>
+                </span>
+                <span className="font-num text-[#f5ebd9] font-bold">
+                  {stats.hp}/{stats.maxHp}
+                </span>
+              </div>
+              <div className="w-full h-1.5 bg-[#120d0a] border border-[#4a3525] overflow-hidden">
+                <div
+                  className={`h-full transition-all duration-300 ${
+                    hpPercent <= 30
+                      ? 'bg-[#e05a47]'
+                      : hpPercent <= 65
+                      ? 'bg-[#e59838]'
+                      : 'bg-[#58b947]'
+                  }`}
+                  style={{ width: `${hpPercent}%` }}
+                />
+              </div>
+            </div>
+
+            <div className="pixel-panel-inner px-2 py-1.5 flex flex-col gap-1">
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="flex items-center gap-1 text-[#f5ebd9]">
+                  <PixelHungerIcon className="w-3.5 h-3.5 shrink-0" />
+                  <span>飽食</span>
+                </span>
+                <span className="font-num text-[#f5ebd9] font-bold">
+                  {stats.hunger}/{stats.maxHunger}
+                </span>
+              </div>
+              <div className="w-full h-1.5 bg-[#120d0a] border border-[#4a3525] overflow-hidden">
+                <div
+                  className={`h-full transition-all duration-300 ${
+                    hungerPercent <= 20 ? 'bg-[#e05a47]' : 'bg-[#f5b041]'
+                  }`}
+                  style={{ width: `${hungerPercent}%` }}
+                />
+              </div>
+            </div>
+
+            <div className="pixel-panel-inner px-2 py-1.5 flex items-center justify-between gap-1">
+              <span className="flex items-center gap-1 text-[11px] text-[#f5ebd9]">
+                <PixelCoinIcon className="w-3.5 h-3.5 shrink-0" />
+                <span>金幣</span>
+              </span>
+              <span className="font-num text-sm font-bold text-[#ffd95a]">
+                {stats.coins}
+              </span>
+            </div>
+          </div>
+
+          {/* Compact Equipment & Cycle Line */}
+          <div className="flex items-center justify-between gap-2 text-[11px] text-[#cbb89e] px-0.5">
+            <span className="truncate">
+              <span className="text-[#ffd95a]">主:{stats.equipment.mainHand ?? '空'}</span>
+              <span className="mx-1 text-[#5e4736]">|</span>
+              <span className="text-[#8ef0a4]">副:{stats.equipment.offHand ?? '空'}</span>
+            </span>
+            <span
+              className={`shrink-0 truncate max-w-[44%] ${
+                worldCycle.timeId === 'night'
+                  ? 'text-[#ff9b8c]'
+                  : worldCycle.timeId === 'day'
+                  ? 'text-[#9fd67a]'
+                  : 'text-[#cbb89e]'
+              }`}
+            >
+              {worldCycle.effectSummary}
+            </span>
+          </div>
+        </div>
+
+        {/* DESKTOP FULL 3-ZONE HEADER (>= lg) */}
+        <div className="hidden lg:flex lg:flex-row lg:items-center justify-between gap-4 w-full">
         {/* Zone 1: Piglet Portrait + Title */}
         <div className="flex items-center gap-3 shrink-0">
           <div className="pixel-panel-inner p-1 shrink-0">
@@ -1395,38 +1661,60 @@ export default function App() {
             </button>
           </div>
         </div>
+        </div>
       </header>
 
-      {/* MAIN 3-COLUMN WORKSPACE */}
-      <main className="grid grid-cols-1 lg:grid-cols-12 gap-4 flex-1 items-start">
+      {/* MAIN 3-COLUMN WORKSPACE (Desktop) / TABBED WORKSPACE (iPhone 15 & Mobile) */}
+      <main className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4 flex-1 items-start">
         {/* LEFT COLUMN: 16-bit Pixel Scene & World Guide */}
-        <section className="lg:col-span-4 flex flex-col gap-4">
-          <PixelSceneCanvas
-            imagePrompt={currentImagePrompt}
-            story={currentStoryForScene}
-            phase={phase}
-            hp={stats.hp}
-            hunger={stats.hunger}
-            variationSeed={sceneSeed}
-            timeId={worldCycle.timeId}
-            seasonId={worldCycle.seasonId}
-            onRedrawScene={handleRedrawScene}
-          />
+        <section
+          className={`lg:col-span-4 flex-col gap-3 sm:gap-4 ${
+            mobileTab === 'adventure' || mobileTab === 'progress' || mobileTab === 'social'
+              ? 'flex'
+              : 'hidden lg:flex'
+          }`}
+        >
+          <div className={mobileTab === 'adventure' ? 'block' : 'hidden lg:block'}>
+            <PixelSceneCanvas
+              imagePrompt={currentImagePrompt}
+              story={currentStoryForScene}
+              phase={phase}
+              hp={stats.hp}
+              hunger={stats.hunger}
+              variationSeed={sceneSeed}
+              timeId={worldCycle.timeId}
+              seasonId={worldCycle.seasonId}
+              onRedrawScene={handleRedrawScene}
+            />
+          </div>
 
-          <div className="pixel-panel p-4 flex flex-col gap-2.5">
-            <div className="flex items-center gap-2 text-[#f3b562]">
-              <Compass className="w-4 h-4 shrink-0" />
-              <h3 className="font-pixel text-sm tracking-wide">泥巴王國冒險指南</h3>
+          <div
+            className={`pixel-panel p-3.5 sm:p-4 flex-col gap-2.5 ${
+              mobileTab === 'progress' ? 'flex' : 'hidden lg:flex'
+            }`}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-[#f3b562]">
+                <Compass className="w-4 h-4 shrink-0" />
+                <h3 className="font-pixel text-sm tracking-wide">泥巴王國冒險指南</h3>
+              </div>
+              <div className="lg:hidden">
+                <PWAInstallButton />
+              </div>
             </div>
             <ul className="text-xs text-[#cbb89e] space-y-1.5 leading-relaxed">
               <li>· 每次行動會消耗 5～10 點飽食度；若餓到歸零，小豬每回合將開始扣血。</li>
               <li>· 遇到食物請別客氣，吃到美味料理能大幅恢復飽食度與精神。</li>
-              <li>· 善用右側背包道具，點擊可直接帶入輸入框與任意天馬行空的行動結合！</li>
+              <li>· 善用背包道具與裝備欄，點擊道具可直接帶入行動框！</li>
             </ul>
           </div>
 
           {/* Adventure Skill Tree & Learned Passives Panel */}
-          <div className="pixel-panel p-4 flex flex-col gap-3">
+          <div
+            className={`pixel-panel p-3.5 sm:p-4 flex-col gap-3 ${
+              mobileTab === 'progress' ? 'flex' : 'hidden lg:flex'
+            }`}
+          >
             <div className="flex items-center justify-between border-b-2 border-[#4a3525] pb-2.5 gap-2">
               <div className="flex items-center gap-2">
                 <GitBranch className="w-4 h-4 text-[#ffd95a]" />
@@ -1575,17 +1863,105 @@ export default function App() {
               )}
             </div>
           </div>
+
+          {/* NPC Affinity Panel */}
+          <div
+            className={`pixel-panel p-3.5 sm:p-4 flex-col gap-3 ${
+              mobileTab === 'social' ? 'flex' : 'hidden lg:flex'
+            }`}
+          >
+            <div className="flex items-center justify-between border-b-2 border-[#4a3525] pb-2.5">
+              <div className="flex items-center gap-2">
+                <Heart className="w-4 h-4 text-[#ff8fab]" />
+                <h3 className="font-pixel text-sm text-[#f5ebd9]">NPC 好感度</h3>
+              </div>
+              <span className="text-[11px] text-[#b8a58d]">高好感享折扣與線索</span>
+            </div>
+
+            <div className="space-y-2">
+              {MUD_KINGDOM_NPCS.map((npc) => {
+                const score = npcAffinities[npc.id] ?? npc.initialAffinity;
+                const tier = getAffinityTier(score);
+                return (
+                  <div
+                    key={npc.id}
+                    className="pixel-panel-inner p-2.5 space-y-1.5"
+                  >
+                    <div className="flex items-center justify-between gap-2 text-xs">
+                      <span className="font-medium text-[#f5ebd9] truncate">
+                        {npc.name}
+                      </span>
+                      <span
+                        className="text-[11px] font-bold shrink-0"
+                        style={{ color: tier.color }}
+                      >
+                        {tier.label}
+                      </span>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <div className="flex-1 h-2 bg-[#120d0a] border border-[#4a3525] overflow-hidden">
+                        <div
+                          className="h-full transition-all duration-300"
+                          style={{
+                            width: `${score}%`,
+                            backgroundColor: tier.color,
+                          }}
+                        />
+                      </div>
+                      <span className="font-num text-[11px] text-[#cbb89e] shrink-0">
+                        {score}/100
+                      </span>
+                    </div>
+
+                    <div className="flex items-center justify-between gap-2 text-[11px]">
+                      <span className="text-[#9e8c77] truncate">
+                        {npc.role} · {tier.perkLabel}
+                      </span>
+                      {phase === 'PLAYING' && (
+                        <button
+                          type="button"
+                          disabled={isLoading}
+                          onClick={() => {
+                            retroAudio.playClick();
+                            setCustomAction(
+                              score >= 70
+                                ? `向${npc.name}打聽冒險線索或進行交易`
+                                : `拜訪${npc.name}並友善聊天或交易`
+                            );
+                            setMobileTab('adventure');
+                            window.setTimeout(() => inputRef.current?.focus(), 40);
+                          }}
+                          className="pixel-btn bg-[#33251c] hover:bg-[#473326] text-[#ffd95a] px-2.5 py-1 min-h-[32px] text-[11px] shrink-0 cursor-pointer disabled:opacity-50"
+                        >
+                          {score >= 70 ? '打聽線索' : '互動'}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
         </section>
 
         {/* CENTER COLUMN: Adventure Log + Survival Trend Dashboard */}
-        <div className="lg:col-span-5 flex flex-col gap-4">
-        <section className="pixel-panel p-4 flex flex-col gap-4 min-h-[540px] lg:h-[calc(100vh-150px)]">
-          <div className="flex items-center justify-between border-b-2 border-[#4a3525] pb-2.5">
+        <div
+          className={`lg:col-span-5 flex-col gap-3 sm:gap-4 ${
+            mobileTab === 'adventure' || mobileTab === 'progress' ? 'flex' : 'hidden lg:flex'
+          }`}
+        >
+        <section
+          className={`pixel-panel p-3 sm:p-4 flex-col gap-3 sm:gap-4 lg:h-[calc(100vh-150px)] ${
+            mobileTab === 'adventure' ? 'flex' : 'hidden lg:flex'
+          }`}
+        >
+          <div className="flex items-center justify-between border-b-2 border-[#4a3525] pb-2">
             <div className="flex items-center gap-2">
               <Sparkles className="w-4 h-4 text-[#f3b562]" />
-              <h2 className="font-pixel text-base text-[#f5ebd9]">冒險日誌</h2>
+              <h2 className="font-pixel text-sm sm:text-base text-[#f5ebd9]">冒險日誌</h2>
             </div>
-            <span className="text-xs text-[#b8a58d]">
+            <span className="text-[11px] sm:text-xs text-[#b8a58d]">
               {phase === 'TITLE'
                 ? '等待小豬出發'
                 : phase === 'TALENT_SELECT'
@@ -1597,26 +1973,45 @@ export default function App() {
           </div>
 
           {/* Scrollable Log Area */}
-          <div className="flex-1 overflow-y-auto rpg-scroll pr-2 space-y-4 min-h-[260px]">
+          <div
+            className={`flex-1 overflow-y-auto rpg-scroll pr-1 sm:pr-2 space-y-3 sm:space-y-4 ${
+              phase === 'PLAYING'
+                ? 'max-h-[40dvh] min-h-[190px] sm:max-h-[48dvh] lg:max-h-none lg:min-h-[260px]'
+                : 'min-h-[240px]'
+            }`}
+          >
             {phase === 'TITLE' && logs.length === 0 && (
-              <div className="pixel-panel-inner p-5 flex flex-col items-center text-center gap-4 my-4">
-                <PigPortrait mood="normal" className="w-20 h-20" />
+              <div className="pixel-panel-inner p-4 sm:p-5 flex flex-col items-center text-center gap-3.5 sm:gap-4 my-2 sm:my-4">
+                <PigPortrait mood="normal" className="w-16 h-16 sm:w-20 sm:h-20" />
                 <div className="space-y-2 max-w-md">
-                  <h3 className="font-pixel text-lg text-[#ffd95a]">
+                  <h3 className="font-pixel text-base sm:text-lg text-[#ffd95a]">
                     歡迎來到奇幻的「泥巴王國」
                   </h3>
-                  <p className="text-sm text-[#e0d2be] leading-relaxed">
+                  <p className="text-xs sm:text-sm text-[#e0d2be] leading-relaxed">
                     你是一隻勇敢、樂觀（而且非常容易肚子餓）的小豬冒險者。森林裡住著會說話的動物、脾氣古怪的哥布林廚師與大野狼強盜，而傳說中的「黃金黑松露」正等著你去發掘！
                   </p>
                 </div>
-                <button
-                  type="button"
-                  onClick={handleStartNewGame}
-                  disabled={isLoading}
-                  className="pixel-btn pixel-btn-primary px-6 py-3 font-pixel text-base cursor-pointer"
-                >
-                  開始新冒險
-                </button>
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-center gap-2.5 w-full sm:w-auto">
+                  <button
+                    type="button"
+                    onClick={handleStartNewGame}
+                    disabled={isLoading}
+                    className="pixel-btn pixel-btn-primary px-6 py-3 min-h-[44px] font-pixel text-base cursor-pointer"
+                  >
+                    開始新冒險
+                  </button>
+                  {hasSavedGame && (
+                    <button
+                      type="button"
+                      onClick={handleLoadLastAdventure}
+                      disabled={isLoading}
+                      className="pixel-btn bg-[#33251c] hover:bg-[#443125] text-[#f5ebd9] px-5 py-3 min-h-[44px] text-sm font-medium flex items-center justify-center gap-2 cursor-pointer"
+                    >
+                      <FolderOpen className="w-4 h-4 text-[#f3b562]" />
+                      <span>載入上次冒險</span>
+                    </button>
+                  )}
+                </div>
               </div>
             )}
 
@@ -1828,6 +2223,37 @@ export default function App() {
                     </div>
                   )}
 
+                  {entry.npcAffinityEvent && (
+                    <div className="px-3 py-2 border bg-[#26191e] border-[#a8556f] flex items-start gap-2.5 text-xs">
+                      <Heart className="w-4 h-4 text-[#ff8fab] shrink-0 mt-0.5" />
+                      <div className="min-w-0 space-y-0.5">
+                        <p className="font-pixel text-[#ffb3c6]">
+                          {entry.npcAffinityEvent.npcName} 好感度{' '}
+                          {entry.npcAffinityEvent.delta > 0
+                            ? `+${entry.npcAffinityEvent.delta}`
+                            : entry.npcAffinityEvent.delta < 0
+                            ? `${entry.npcAffinityEvent.delta}`
+                            : '互動'}
+                          （{entry.npcAffinityEvent.newAffinity}/100 · {entry.npcAffinityEvent.tierLabel}）
+                        </p>
+                        {entry.npcAffinityEvent.discountCoinsSaved > 0 && (
+                          <p className="text-[#9fd67a]">
+                            好感度交易折扣生效：本次交易省下{' '}
+                            <span className="font-num font-bold">
+                              {entry.npcAffinityEvent.discountCoinsSaved}
+                            </span>{' '}
+                            枚豬豬幣！
+                          </p>
+                        )}
+                        {entry.npcAffinityEvent.proactiveClue && (
+                          <p className="text-[#ffd95a] leading-relaxed">
+                            冒險線索：{entry.npcAffinityEvent.proactiveClue}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
                   <TypewriterText text={entry.story} animate={isLatest} />
 
                   {/* Turn Stat Deltas (Zero-Pill clean inline metrics) */}
@@ -2003,10 +2429,37 @@ export default function App() {
 
           {/* BOTTOM ACTION CONTROLS */}
           {phase === 'PLAYING' && (
-            <div className="border-t-2 border-[#4a3525] pt-3 space-y-3 shrink-0">
+            <div className="border-t-2 border-[#4a3525] pt-2.5 sm:pt-3 space-y-2.5 sm:space-y-3 shrink-0">
+              {(stats.skillPoints > 0 || hasActiveQuestItem) && (
+                <div className="flex lg:hidden flex-wrap items-center gap-2">
+                  {stats.skillPoints > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setMobileTab('progress')}
+                      className="pixel-btn bg-[#232b1c] border-[#7ce06b] text-[#9fd67a] px-2.5 py-1.5 text-xs font-medium flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <ArrowUpCircle className="w-3.5 h-3.5 text-[#7ce06b]" />
+                      <span>有 {stats.skillPoints} 點技能點可領悟 →</span>
+                    </button>
+                  )}
+                  {hasActiveQuestItem && (
+                    <button
+                      type="button"
+                      onClick={() => setMobileTab('social')}
+                      className="pixel-btn bg-[#292210] border-[#d99b26] text-[#ffd95a] px-2.5 py-1.5 text-xs font-medium flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <ScrollText className="w-3.5 h-3.5 text-[#ffd95a]" />
+                      <span>委託道具已齊全，點此交付 →</span>
+                    </button>
+                  )}
+                </div>
+              )}
+
               {/* 3 AI Choices */}
               <div className="space-y-1.5">
-                <p className="text-xs text-[#b8a58d]">快速抉擇（可按鍵盤 1 / 2 / 3）</p>
+                <p className="text-[11px] sm:text-xs text-[#b8a58d]">
+                  快速抉擇<span className="hidden sm:inline">（可按鍵盤 1 / 2 / 3）</span>
+                </p>
                 <div className="grid grid-cols-1 gap-2">
                   {currentChoices.map((choice, idx) => (
                     <button
@@ -2014,7 +2467,7 @@ export default function App() {
                       type="button"
                       disabled={isLoading}
                       onClick={() => executeTurn(false, choice)}
-                      className="pixel-btn bg-[#33251c] hover:bg-[#473326] text-left px-3.5 py-2.5 text-sm text-[#f5ebd9] flex items-center justify-between gap-2 cursor-pointer disabled:opacity-50"
+                      className="pixel-btn bg-[#33251c] hover:bg-[#473326] text-left px-3 sm:px-3.5 py-2.5 min-h-[44px] text-sm text-[#f5ebd9] flex items-center justify-between gap-2 cursor-pointer disabled:opacity-50"
                     >
                       <span className="leading-snug">{choice}</span>
                       <span className="font-num text-xs text-[#f3b562] shrink-0">
@@ -2025,7 +2478,7 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Custom Free-text Action Input */}
+              {/* Custom Free-text Action Input (16px on mobile to prevent iOS Safari focus zoom) */}
               <form onSubmit={handleSubmitCustomAction} className="flex items-center gap-2">
                 <input
                   ref={inputRef}
@@ -2033,13 +2486,13 @@ export default function App() {
                   value={customAction}
                   onChange={(e) => setCustomAction(e.target.value)}
                   disabled={isLoading}
-                  placeholder="輸入自訂行動（例：對大野狼跳一段舞、用木湯匙挖洞）"
-                  className="pixel-panel-inner flex-1 px-3 py-2.5 text-sm text-[#f5ebd9] placeholder-[#8c7a65] focus:outline-none focus:border-[#f3b562]"
+                  placeholder="輸入自訂行動（如：用木湯匙挖洞）"
+                  className="pixel-panel-inner flex-1 min-w-0 px-3 py-2.5 min-h-[44px] text-base sm:text-sm text-[#f5ebd9] placeholder-[#8c7a65] focus:outline-none focus:border-[#f3b562]"
                 />
                 <button
                   type="submit"
                   disabled={isLoading || !customAction.trim()}
-                  className="pixel-btn pixel-btn-primary px-4 py-2.5 text-sm font-bold flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+                  className="pixel-btn pixel-btn-primary px-3.5 sm:px-4 py-2.5 min-h-[44px] text-sm font-bold flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
                 >
                   <Send className="w-4 h-4" />
                   <span>行動</span>
@@ -2049,13 +2502,25 @@ export default function App() {
           )}
         </section>
 
-        <SurvivalStatsChart logs={logs} />
+        <div className={mobileTab === 'progress' ? 'block' : 'hidden lg:block'}>
+          <SurvivalStatsChart logs={logs} />
+        </div>
         </div>
 
         {/* RIGHT COLUMN: Active Quest + Inventory Bag + Hidden Achievements */}
-        <aside className="lg:col-span-3 flex flex-col gap-4">
+        <aside
+          className={`lg:col-span-3 flex-col gap-3 sm:gap-4 ${
+            mobileTab === 'bag' || mobileTab === 'social' || mobileTab === 'progress'
+              ? 'flex'
+              : 'hidden lg:flex'
+          }`}
+        >
           {/* Active NPC Quest Panel */}
-          <div className="pixel-panel p-4 flex flex-col gap-3">
+          <div
+            className={`pixel-panel p-3.5 sm:p-4 flex-col gap-3 ${
+              mobileTab === 'social' ? 'flex' : 'hidden lg:flex'
+            }`}
+          >
             <div className="flex items-center justify-between border-b-2 border-[#4a3525] pb-2.5">
               <div className="flex items-center gap-2">
                 <ScrollText className="w-4 h-4 text-[#ffd95a]" />
@@ -2112,13 +2577,14 @@ export default function App() {
                     <button
                       type="button"
                       disabled={isLoading}
-                      onClick={() =>
+                      onClick={() => {
+                        setMobileTab('adventure');
                         executeTurn(
                           false,
                           `將「${activeQuest.targetItem}」交給${activeQuest.npcName}並領取委託報酬`
-                        )
-                      }
-                      className="pixel-btn pixel-btn-primary w-full py-2 px-3 text-xs font-bold cursor-pointer disabled:opacity-50"
+                        );
+                      }}
+                      className="pixel-btn pixel-btn-primary w-full py-2.5 min-h-[44px] px-3 text-xs font-bold cursor-pointer disabled:opacity-50"
                     >
                       立即交付委託領賞
                     </button>
@@ -2129,9 +2595,10 @@ export default function App() {
                       onClick={() => {
                         retroAudio.playClick();
                         setCustomAction(activeQuest.clueHint);
-                        inputRef.current?.focus();
+                        setMobileTab('adventure');
+                        window.setTimeout(() => inputRef.current?.focus(), 40);
                       }}
-                      className="pixel-btn bg-[#33251c] hover:bg-[#473326] w-full py-2 px-3 text-xs text-[#f5ebd9] cursor-pointer disabled:opacity-50"
+                      className="pixel-btn bg-[#33251c] hover:bg-[#473326] w-full py-2.5 min-h-[44px] px-3 text-xs text-[#f5ebd9] cursor-pointer disabled:opacity-50"
                     >
                       帶入線索：{activeQuest.clueHint}
                     </button>
@@ -2145,7 +2612,11 @@ export default function App() {
           </div>
 
           {/* Piglet Equipment Slots Panel */}
-          <div className="pixel-panel p-4 flex flex-col gap-3">
+          <div
+            className={`pixel-panel p-3.5 sm:p-4 flex-col gap-3 ${
+              mobileTab === 'bag' ? 'flex' : 'hidden lg:flex'
+            }`}
+          >
             <div className="flex items-center justify-between border-b-2 border-[#4a3525] pb-2.5">
               <div className="flex items-center gap-2">
                 <Swords className="w-4 h-4 text-[#ffd95a]" />
@@ -2232,7 +2703,11 @@ export default function App() {
             )}
           </div>
 
-          <div className="pixel-panel p-4 flex flex-col gap-3">
+          <div
+            className={`pixel-panel p-3.5 sm:p-4 flex-col gap-3 ${
+              mobileTab === 'bag' ? 'flex' : 'hidden lg:flex'
+            }`}
+          >
             <div className="flex items-center justify-between border-b-2 border-[#4a3525] pb-2.5">
               <div className="flex items-center gap-2">
                 <Backpack className="w-4 h-4 text-[#f3b562]" />
@@ -2346,13 +2821,13 @@ export default function App() {
                           <span className="text-[10px] text-[#9e8c77] truncate">
                             {equipProfile.categoryLabel}（{equipProfile.effectSummary}）
                           </span>
-                          <div className="flex items-center gap-1 shrink-0">
+                          <div className="flex items-center gap-1.5 shrink-0">
                             <button
                               type="button"
                               disabled={isLoading}
                               onClick={() => handleEquipItem(idx, 'mainHand')}
                               title={`將「${item}」裝備到主手`}
-                              className="pixel-btn bg-[#3a2a16] hover:bg-[#4e381d] border-[#8f6a28] text-[#ffd95a] px-2 py-0.5 text-[11px] cursor-pointer disabled:opacity-50"
+                              className="pixel-btn bg-[#3a2a16] hover:bg-[#4e381d] border-[#8f6a28] text-[#ffd95a] px-2.5 py-1 min-h-[32px] text-[11px] cursor-pointer disabled:opacity-50"
                             >
                               裝主手
                             </button>
@@ -2361,7 +2836,7 @@ export default function App() {
                               disabled={isLoading}
                               onClick={() => handleEquipItem(idx, 'offHand')}
                               title={`將「${item}」裝備到副手`}
-                              className="pixel-btn bg-[#243025] hover:bg-[#314232] border-[#5f8c4d] text-[#9fd67a] px-2 py-0.5 text-[11px] cursor-pointer disabled:opacity-50"
+                              className="pixel-btn bg-[#243025] hover:bg-[#314232] border-[#5f8c4d] text-[#9fd67a] px-2.5 py-1 min-h-[32px] text-[11px] cursor-pointer disabled:opacity-50"
                             >
                               裝副手
                             </button>
@@ -2376,7 +2851,11 @@ export default function App() {
           </div>
 
           {/* Hidden Achievements Trophy Case */}
-          <div className="pixel-panel p-4 flex flex-col gap-3">
+          <div
+            className={`pixel-panel p-3.5 sm:p-4 flex-col gap-3 ${
+              mobileTab === 'progress' ? 'flex' : 'hidden lg:flex'
+            }`}
+          >
             <div className="flex items-center justify-between border-b-2 border-[#4a3525] pb-2.5">
               <div className="flex items-center gap-2">
                 <Award className="w-4 h-4 text-[#ffd95a]" />
@@ -2420,6 +2899,86 @@ export default function App() {
           </div>
         </aside>
       </main>
+
+      {/* MOBILE BOTTOM THUMB NAVIGATION BAR (iPhone 15 / < lg) */}
+      <nav
+        aria-label="手機版功能分頁"
+        className="lg:hidden fixed bottom-0 left-0 right-0 z-40 bg-[#1a130f]/95 backdrop-blur-md border-t-2 border-[#6b4e37] pb-safe"
+      >
+        <div className="grid grid-cols-4 h-[58px]">
+          <button
+            type="button"
+            onClick={() => {
+              retroAudio.playClick();
+              setMobileTab('adventure');
+            }}
+            className={`min-h-[44px] flex flex-col items-center justify-center gap-0.5 text-[11px] font-medium cursor-pointer transition-colors ${
+              mobileTab === 'adventure'
+                ? 'text-[#ffd95a] bg-[#2c2017]'
+                : 'text-[#b8a58d] hover:text-[#f5ebd9]'
+            }`}
+          >
+            <Compass className="w-5 h-5" />
+            <span className="whitespace-nowrap">冒險</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              retroAudio.playClick();
+              setMobileTab('bag');
+            }}
+            className={`min-h-[44px] flex flex-col items-center justify-center gap-0.5 text-[11px] font-medium cursor-pointer transition-colors ${
+              mobileTab === 'bag'
+                ? 'text-[#ffd95a] bg-[#2c2017]'
+                : 'text-[#b8a58d] hover:text-[#f5ebd9]'
+            }`}
+          >
+            <Backpack className="w-5 h-5" />
+            <span className="whitespace-nowrap font-num">
+              背包·{stats.inventory.length}
+              {availableCrafts.length > 0 ? '★' : ''}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              retroAudio.playClick();
+              setMobileTab('social');
+            }}
+            className={`min-h-[44px] flex flex-col items-center justify-center gap-0.5 text-[11px] font-medium cursor-pointer transition-colors ${
+              mobileTab === 'social'
+                ? 'text-[#ffd95a] bg-[#2c2017]'
+                : 'text-[#b8a58d] hover:text-[#f5ebd9]'
+            }`}
+          >
+            <Heart className="w-5 h-5" />
+            <span className="whitespace-nowrap">
+              {hasActiveQuestItem ? '委託可交' : activeQuest ? '委託·NPC' : 'NPC好感'}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              retroAudio.playClick();
+              setMobileTab('progress');
+            }}
+            className={`min-h-[44px] flex flex-col items-center justify-center gap-0.5 text-[11px] font-medium cursor-pointer transition-colors ${
+              mobileTab === 'progress'
+                ? 'text-[#ffd95a] bg-[#2c2017]'
+                : 'text-[#b8a58d] hover:text-[#f5ebd9]'
+            }`}
+          >
+            <GitBranch className="w-5 h-5" />
+            <span className="whitespace-nowrap font-num">
+              {stats.skillPoints > 0 ? `技能+${stats.skillPoints}` : '技能·成就'}
+            </span>
+          </button>
+        </div>
+      </nav>
+
       {isLeaderboardOpen && (
         <Suspense fallback={null}>
           <LeaderboardModal

@@ -35,22 +35,22 @@ export const SkillTreeModal: React.FC<SkillTreeModalProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-3 sm:p-5"
+      className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-2.5 sm:p-5 pb-safe"
       role="dialog"
       aria-modal="true"
       aria-labelledby="skill-tree-modal-title"
     >
-      <div className="pixel-panel w-full max-w-4xl max-h-[90vh] flex flex-col overflow-hidden">
+      <div className="pixel-panel w-full max-w-4xl max-h-[88dvh] flex flex-col overflow-hidden">
         {/* Header */}
-        <div className="px-4 py-3 border-b-2 border-[#4a3525] flex items-center justify-between gap-3 bg-[#1f1611]">
-          <div className="flex items-center gap-2.5">
+        <div className="px-3.5 py-2.5 sm:px-4 sm:py-3 border-b-2 border-[#4a3525] flex items-center justify-between gap-2 bg-[#1f1611]">
+          <div className="flex items-center gap-2 min-w-0">
             <Sparkles className="w-5 h-5 text-[#ffd95a] shrink-0" />
-            <div>
-              <h2 id="skill-tree-modal-title" className="font-pixel text-base sm:text-lg text-[#f5ebd9]">
+            <div className="min-w-0">
+              <h2 id="skill-tree-modal-title" className="font-pixel text-base sm:text-lg text-[#f5ebd9] truncate">
                 小豬冒險技能樹
               </h2>
-              <p className="text-xs text-[#cbb89e] font-num">
-                Lv.{level}（經驗值 {xp}/{nextLevelXp}）· 已領悟 {learnedSkillIds.length}/{SKILL_TREE_NODES.length} 項 · 可用技能點：
+              <p className="text-[11px] sm:text-xs text-[#cbb89e] font-num">
+                Lv.{level}（XP {xp}/{nextLevelXp}）· 已領悟 {learnedSkillIds.length}/{SKILL_TREE_NODES.length} · 技能點：
                 <span className={skillPoints > 0 ? 'text-[#ffd95a] font-bold' : 'text-[#cbb89e]'}>
                   {skillPoints}
                 </span>
@@ -62,7 +62,7 @@ export const SkillTreeModal: React.FC<SkillTreeModalProps> = ({
             type="button"
             onClick={onClose}
             aria-label="關閉技能樹"
-            className="pixel-btn bg-[#33251c] hover:bg-[#473326] text-[#f5ebd9] p-1.5 cursor-pointer"
+            className="pixel-btn bg-[#33251c] hover:bg-[#473326] text-[#f5ebd9] min-w-[44px] min-h-[44px] flex items-center justify-center shrink-0 cursor-pointer"
           >
             <X className="w-4 h-4" />
           </button>
@@ -164,7 +164,7 @@ export const SkillTreeModal: React.FC<SkillTreeModalProps> = ({
                               <button
                                 type="button"
                                 onClick={() => onLearnSkill(node.id)}
-                                className="pixel-btn pixel-btn-primary w-full py-1.5 px-2.5 text-xs font-bold mt-1 cursor-pointer"
+                                className="pixel-btn pixel-btn-primary w-full min-h-[40px] py-2 px-2.5 text-xs font-bold mt-1 cursor-pointer"
                               >
                                 消耗 1 技能點領悟
                               </button>
