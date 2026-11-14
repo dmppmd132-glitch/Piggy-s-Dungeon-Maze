@@ -6,6 +6,7 @@ import dotenv from 'dotenv';
 import {
   generateDmEpitaph,
   generateDmTurn,
+  generateDmTurnStream,
   type EpitaphRequestBody,
   type TurnRequestBody,
 } from './api/_lib/dm.ts';
@@ -72,8 +73,36 @@ async function startServer() {
 
   app.post('/api/dm/turn', async (req, res) => {
     const body = (req.body || {}) as TurnRequestBody;
-    const result = await generateDmTurn(body);
-    res.status(result.status).json(result.payload);
+    const acceptHeader = String(req.headers.accept || '');
+    const wantsStream = Boolean(body.stream) || acceptHeader.includes('text/event-stream');
+
+    if (!wantsStream) {
+      const result = await generateDmTurn(body);
+      res.status(result.status).json(result.payload);
+      return;
+    }
+
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders?.();
+
+    const sendEvent = (event: string, data: unknown) => {
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    };
+
+    const result = await generateDmTurnStream(body, (story) => {
+      sendEvent('story', { story });
+    });
+
+    if (result.status === 200) {
+      sendEvent('done', result.payload);
+    } else {
+      sendEvent('error', result.payload);
+    }
+
+    res.end();
   });
 
   app.post('/api/dm/epitaph', async (req, res) => {

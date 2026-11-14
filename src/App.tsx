@@ -299,6 +299,7 @@ export default function App() {
   const [mobileTab, setMobileTab] = useState<'adventure' | 'bag' | 'social' | 'progress'>(
     'adventure'
   );
+  const [streamingStory, setStreamingStory] = useState<string>('');
 
   const handleNicknameChange = useCallback((name: string) => {
     const saved = saveNickname(name);
@@ -307,6 +308,7 @@ export default function App() {
 
   const logBottomRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const streamedEntryIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
@@ -359,8 +361,10 @@ export default function App() {
   ]);
 
   useEffect(() => {
-    logBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [logs.length, isLoading, phase]);
+    logBottomRef.current?.scrollIntoView({
+      behavior: streamingStory ? 'auto' : 'smooth',
+    });
+  }, [logs.length, isLoading, streamingStory, phase]);
 
   const pigMood: PigMood = useMemo(() => {
     if (phase === 'GAME_OVER' || stats.hp <= 0) return 'dead';
@@ -545,18 +549,24 @@ export default function App() {
 
       const historyPayload = isStart
         ? []
-        : logs.slice(-4).map((l) => ({
+        : logs.slice(-3).map((l) => ({
             turn: l.turn,
             action: l.playerAction,
             story: l.story,
           }));
 
+      setStreamingStory('');
+
       try {
         const response = await fetch('/api/dm/turn', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'text/event-stream, application/json',
+          },
           body: JSON.stringify({
             isStart,
+            stream: true,
             action: cleanAction,
             turn: nextTurnNumber,
             stats: {
@@ -594,12 +604,82 @@ export default function App() {
           }),
         });
 
-        const payload = await response.json();
-        if (!response.ok) {
-          throw new Error(payload.error || '地下城主暫時沒有回應，請再試一次。');
+        let resolvedDm: DmTurnResponse | null = null;
+        let receivedStreamedStory = false;
+        const contentType = response.headers.get('content-type') || '';
+
+        if (contentType.includes('text/event-stream') && response.body) {
+          if (!response.ok) {
+            throw new Error('地下城主暫時沒有回應，請再試一次。');
+          }
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = '';
+
+          const processSseBlock = (block: string) => {
+            const lines = block.split(/\r?\n/);
+            let eventName = 'message';
+            const dataLines: string[] = [];
+            for (const line of lines) {
+              if (line.startsWith('event:')) {
+                eventName = line.slice(6).trim();
+              } else if (line.startsWith('data:')) {
+                dataLines.push(line.slice(5).trim());
+              }
+            }
+            if (dataLines.length === 0) return;
+            const jsonText = dataLines.join('\n');
+            const parsedData = JSON.parse(jsonText) as Record<string, unknown>;
+
+            if (eventName === 'story' && typeof parsedData.story === 'string') {
+              if (parsedData.story.length > 0) {
+                receivedStreamedStory = true;
+              }
+              setStreamingStory(parsedData.story);
+            } else if (eventName === 'done') {
+              resolvedDm = parsedData as unknown as DmTurnResponse;
+            } else if (eventName === 'error') {
+              throw new Error(
+                typeof parsedData.error === 'string'
+                  ? parsedData.error
+                  : '地下城主暫時沒有回應，請再試一次。'
+              );
+            }
+          };
+
+          while (true) {
+            const { value, done } = await reader.read();
+            if (value) {
+              buffer += decoder.decode(value, { stream: !done });
+            }
+            let sepIdx = buffer.indexOf('\n\n');
+            while (sepIdx !== -1) {
+              const block = buffer.slice(0, sepIdx);
+              buffer = buffer.slice(sepIdx + 2);
+              if (block.trim()) {
+                processSseBlock(block);
+              }
+              sepIdx = buffer.indexOf('\n\n');
+            }
+            if (done) break;
+          }
+
+          if (buffer.trim()) {
+            processSseBlock(buffer);
+          }
+
+          if (!resolvedDm) {
+            throw new Error('地下城主故事傳輸中斷，請再試一次。');
+          }
+        } else {
+          const payload = await response.json();
+          if (!response.ok) {
+            throw new Error(payload.error || '地下城主暫時沒有回應，請再試一次。');
+          }
+          resolvedDm = payload as DmTurnResponse;
         }
 
-        const dm = payload as DmTurnResponse;
+        const dm: DmTurnResponse = resolvedDm;
 
         // Enforce hunger, starvation, equipment bonuses, skill tree passives, talent multipliers, world cycle & random event rules cleanly
         let rawHungerDelta = isStart ? 0 : dm.hunger_change;
@@ -923,8 +1003,13 @@ export default function App() {
           skillPoints: levelProgression.skillPoints,
         };
 
+        const entryId = `${Date.now()}-${nextTurnNumber}`;
+        if (receivedStreamedStory) {
+          streamedEntryIdsRef.current.add(entryId);
+        }
+
         const newEntry: LogEntry = {
-          id: `${Date.now()}-${nextTurnNumber}`,
+          id: entryId,
           turn: nextTurnNumber,
           playerAction: isStart ? null : cleanAction,
           story: dm.story,
@@ -964,6 +1049,7 @@ export default function App() {
           savePersistedAchievementIds(mergedIds);
         }
 
+        setStreamingStory('');
         setTurn(nextTurnNumber);
         setLogs((prev) => (isStart ? [newEntry] : [...prev, newEntry]));
         setCurrentChoices(dm.choices);
@@ -1025,6 +1111,7 @@ export default function App() {
         setErrorMsg(msg);
         setLastFailedRequest({ isStart, action: cleanAction });
       } finally {
+        setStreamingStory('');
         setIsLoading(false);
       }
     },
@@ -2254,7 +2341,10 @@ export default function App() {
                     </div>
                   )}
 
-                  <TypewriterText text={entry.story} animate={isLatest} />
+                  <TypewriterText
+                    text={entry.story}
+                    animate={isLatest && !streamedEntryIdsRef.current.has(entry.id)}
+                  />
 
                   {/* Turn Stat Deltas (Zero-Pill clean inline metrics) */}
                   {(entry.deltas.hpChange !== 0 ||
@@ -2336,13 +2426,28 @@ export default function App() {
               );
             })}
 
-            {/* Loading Indicator */}
-            {isLoading && (
-              <div className="pixel-panel-inner p-4 flex items-center gap-3 text-sm text-[#f3b562]">
-                <div className="w-3 h-3 bg-[#f3b562] pixel-bob shrink-0" />
-                <span className="font-pixel">地下城主正在擲骰撰寫下一段冒險...</span>
-              </div>
-            )}
+            {/* Live Streaming Story / Loading Indicator */}
+            {isLoading &&
+              (streamingStory ? (
+                <article className="pixel-panel-inner p-3.5 space-y-2 border-[#8f6a28]">
+                  <div className="flex items-center justify-between text-xs text-[#f3b562]">
+                    <span className="font-pixel">第 {turn + 1} 回合</span>
+                    <span className="text-[11px] text-[#cbb89e]">地下城主即時書寫中...</span>
+                  </div>
+                  <p className="text-[15.5px] leading-[1.75] text-[#f5ebd9] whitespace-pre-wrap">
+                    {streamingStory}
+                    <span
+                      className="inline-block w-2 h-4 ml-1 align-middle bg-[#f3b562] pixel-bob"
+                      aria-hidden="true"
+                    />
+                  </p>
+                </article>
+              ) : (
+                <div className="pixel-panel-inner p-4 flex items-center gap-3 text-sm text-[#f3b562]">
+                  <div className="w-3 h-3 bg-[#f3b562] pixel-bob shrink-0" />
+                  <span className="font-pixel">地下城主正在快速擲骰...</span>
+                </div>
+              ))}
 
             {/* Error Banner */}
             {errorMsg && (
