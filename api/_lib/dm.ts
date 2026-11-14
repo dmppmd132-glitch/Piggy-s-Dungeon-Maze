@@ -126,6 +126,34 @@ export interface TurnRequestBody {
     category?: string;
     dmInstruction?: string;
   } | null;
+  worldCycle?: {
+    shortStatus?: string;
+    effectSummary?: string;
+    dmDirective?: string;
+  } | null;
+  questContext?: {
+    mode: 'ACCEPTED' | 'SEARCH_SUCCESS' | 'ONGOING' | 'COMPLETED';
+    npcName: string;
+    title: string;
+    description: string;
+    targetItem: string;
+    rewardCoins: number;
+    rewardItem: string | null;
+  } | null;
+  equipment?: {
+    mainHand: string | null;
+    offHand: string | null;
+    attackBonus: number;
+    defenseBonus: number;
+    hungerSaveBonus: number;
+    coinBonus: number;
+  } | null;
+  skills?: {
+    level: number;
+    learnedNames: string[];
+    itemDiscoveryBonusPercent: number;
+    hungerReductionPercent: number;
+  } | null;
 }
 
 export interface EpitaphRequestBody {
@@ -202,10 +230,45 @@ export async function generateDmTurn(body: TurnRequestBody) {
           .join('\n')
       : '尚無先前紀錄（冒險剛開始）。';
 
+  const worldCyclePrompt = body.worldCycle?.dmDirective
+    ? `\n【泥巴王國季節與時間環境】\n${body.worldCycle.dmDirective}\n請務必在劇情氛圍、怪物出現頻率或視野描寫中呼應此天時與季節（如白天視野更清晰、夜晚怪物與伏擊機率明顯上升）。\n`
+    : '';
+
   const randomEventPrompt =
     !isStart && body.randomEvent?.dmInstruction
       ? `\n【本回合觸發隨機事件：${body.randomEvent.title ?? '旅途突發狀況'}】\n${body.randomEvent.dmInstruction}\n（注意：系統已另外結算此隨機事件的額外數值與臨時道具，請專注在劇情與對話中生動反映此事件，不需在 new_item 重複輸出同一項臨時道具。）\n`
       : '';
+
+  let questPrompt = '';
+  if (!isStart && body.questContext) {
+    const q = body.questContext;
+    if (q.mode === 'ACCEPTED') {
+      questPrompt = `\n【本回合觸發 NPC 委託任務：${q.npcName} 的「${q.title}」】\n委託內容：${q.description}\n目標道具：「${q.targetItem}」（報酬：${q.rewardCoins} 豬豬幣${q.rewardItem ? `＋稀有道具「${q.rewardItem}」` : ''}）。\n請在劇情中讓「${q.npcName}」登場向小豬求助並交付此委託，並在其中 1 個行動選項 (choices) 中提供前往搜尋「${q.targetItem}」的線索方向！\n`;
+    } else if (q.mode === 'SEARCH_SUCCESS') {
+      questPrompt = `\n【委託線索大成功：尋獲「${q.targetItem}」】\n小豬正在進行「${q.npcName}」的委託「${q.title}」。本回合小豬主動搜尋線索並成功找到了「${q.targetItem}」！\n請務必在劇情中生動描寫小豬找到「${q.targetItem}」的逗趣過程，並將 new_item 設為「${q.targetItem}」，在選項中也提示可以拿回去交給「${q.npcName}」領賞。（系統稍後會於玩家交付時另行發放任務賞金。）\n`;
+    } else if (q.mode === 'COMPLETED') {
+      questPrompt = `\n【委託任務達成！】\n小豬將「${q.targetItem}」交給了「${q.npcName}」，順利完成委託「${q.title}」！\n請在劇情中生動描寫「${q.npcName}」感動又誇張的致謝反應（注意：系統已另外自動結算扣除目標道具並發放 ${q.rewardCoins} 豬豬幣${q.rewardItem ? `與稀有道具「${q.rewardItem}」` : ''}，請勿在 coins_change、new_item 或 lost_item 重複計算任務報酬與任務道具）。\n`;
+    } else if (q.mode === 'ONGOING') {
+      questPrompt = `\n【目前進行中的委託任務】\n委託人：${q.npcName}｜任務：「${q.title}」｜目標道具：「${q.targetItem}」。\n可適度在故事線索或其中一個行動選項中提醒小豬順道尋找「${q.targetItem}」；若玩家行動正好在仔細翻找對應線索，也可以把 new_item 設為「${q.targetItem}」。\n`;
+    }
+  }
+
+  const eq = body.equipment;
+  const equipmentText =
+    eq && (eq.mainHand || eq.offHand)
+      ? `- 目前裝備：主手「${eq.mainHand ?? '空著'}」／副手「${eq.offHand ?? '空著'}」（裝備加成：攻擊 +${eq.attackBonus}、防禦 +${eq.defenseBonus}、省糧 +${eq.hungerSaveBonus}、尋寶 +${eq.coinBonus}）。遭遇戰鬥或冒險考驗時，請在劇情中自然描繪小豬運用手中裝備迎戰或化險為夷的帥氣／爆笑畫面！`
+      : '- 目前裝備：主手「空著」／副手「空著」（尚未裝備任何道具）';
+
+  const sk = body.skills;
+  const skillText = sk
+    ? `- 冒險者等級：Lv.${sk.level}｜已領悟被動技能：${
+        sk.learnedNames.length > 0 ? sk.learnedNames.join('、') : '尚無（剛起步的菜鳥小豬）'
+      }${
+        sk.itemDiscoveryBonusPercent > 0
+          ? `（小豬的尋寶嗅覺額外敏銳 +${sk.itemDiscoveryBonusPercent}%，探索時請多給予有趣實用的道具驚喜！）`
+          : ''
+      }`
+    : '';
 
   const userPrompt = isStart
     ? `【開始新冒險 - 第 1 回合】
@@ -214,7 +277,9 @@ export async function generateDmTurn(body: TurnRequestBody) {
 - 飽食度 (Hunger): ${stats.hunger}/100
 - 豬豬幣 (Coins): ${stats.coins}
 - 背包物品: ${stats.inventory.join('、') || '空無一物'}
-
+${equipmentText}
+${skillText}
+${worldCyclePrompt}
 請撰寫泥巴王國冒險的開場第一回合！小豬剛帶著「生鏽的木湯匙」和「半顆蘋果」離開泥巴村莊，準備去尋找傳說中的「黃金黑松露」，並在路上遇到第一個有趣的森林奇遇或角色。記住第一回合所有數值變化皆為 0，new_item 與 lost_item 皆為 null。`
     : `【第 ${turn} 回合】
 最近冒險摘要：
@@ -225,7 +290,9 @@ ${historySummary}
 - 飽食度 (Hunger): ${stats.hunger}/100 ${stats.hunger <= 0 ? '（警告：飽食度已歸零，沒吃到東西會開始飢餓扣血！）' : ''}
 - 豬豬幣 (Coins): ${stats.coins}
 - 背包物品: ${stats.inventory.join('、') || '空無一物'}
-${randomEventPrompt}
+${equipmentText}
+${skillText}
+${worldCyclePrompt}${randomEventPrompt}${questPrompt}
 本回合玩家的行動：「${action}」
 
 請根據玩家行動推進泥巴王國的奇幻劇情，計算合理的 HP / 飽食度 / 豬豬幣變化與物品得失，並給出 3 個有趣的新選項與對應英文像素場景提示詞。`;

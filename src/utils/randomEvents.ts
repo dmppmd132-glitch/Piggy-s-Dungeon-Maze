@@ -1,4 +1,5 @@
 import type { RandomEventCategory, TurnRandomEvent } from '../types/game';
+import type { WorldCycleState } from './worldCycle';
 
 export interface RandomEventDefinition {
   id: string;
@@ -131,13 +132,36 @@ export interface RolledRandomEvent {
   dmInstruction: string;
 }
 
-export function rollRandomEvent(turn: number): RolledRandomEvent | null {
-  // Turn 1 is the opening prologue; trigger ~38% of turns from Turn 2 onward
+export function rollRandomEvent(
+  turn: number,
+  worldCycle?: WorldCycleState,
+  skillSurpriseBonus = 0
+): RolledRandomEvent | null {
+  // Turn 1 is the opening prologue; trigger from Turn 2 onward
   if (turn < 2) return null;
-  if (Math.random() >= 0.38) return null;
 
-  const picked =
-    RANDOM_EVENT_POOL[Math.floor(Math.random() * RANDOM_EVENT_POOL.length)];
+  const baseTriggerChance = 0.36;
+  const bonus = worldCycle ? Math.max(-0.08, worldCycle.modifiers.surpriseChanceBonus * 0.5) : 0;
+  if (Math.random() >= baseTriggerChance + bonus + skillSurpriseBonus * 0.5) return null;
+
+  const candidates = RANDOM_EVENT_POOL.filter((ev) => {
+    if (worldCycle?.timeId === 'night' && ev.id === 'mud_rainbow') {
+      return false;
+    }
+    return true;
+  });
+
+  // Higher visibility (day/spring/autumn) favors roadside surprises; night/winter leans toward weather events
+  const surpriseBias = worldCycle
+    ? Math.min(0.88, Math.max(0.25, 0.5 + worldCycle.modifiers.surpriseChanceBonus + skillSurpriseBonus))
+    : Math.min(0.88, 0.5 + skillSurpriseBonus);
+  const wantSurprise = Math.random() < surpriseBias;
+  const preferred = candidates.filter((ev) =>
+    wantSurprise ? ev.category === 'surprise' : ev.category === 'weather'
+  );
+  const pool = preferred.length > 0 ? preferred : candidates;
+  const picked = pool[Math.floor(Math.random() * pool.length)];
+
   return {
     event: {
       id: picked.id,

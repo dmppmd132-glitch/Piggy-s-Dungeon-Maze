@@ -8,6 +8,33 @@ export interface TalentModifiers {
   coinGainMultiplier: number;
 }
 
+export type EquipSlot = 'mainHand' | 'offHand';
+
+export interface EquipmentState {
+  mainHand: string | null;
+  offHand: string | null;
+}
+
+export interface EquipmentBonuses {
+  attackBonus: number;
+  defenseBonus: number;
+  hungerSaveBonus: number;
+  coinBonus: number;
+}
+
+export type SkillBranchId = 'survival' | 'foraging' | 'combat';
+
+export type SkillId =
+  | 'survival_1'
+  | 'survival_2'
+  | 'survival_3'
+  | 'foraging_1'
+  | 'foraging_2'
+  | 'foraging_3'
+  | 'combat_1'
+  | 'combat_2'
+  | 'combat_3';
+
 export interface PlayerStats {
   hp: number;
   maxHp: number;
@@ -15,8 +42,13 @@ export interface PlayerStats {
   maxHunger: number;
   coins: number;
   inventory: string[];
+  equipment: EquipmentState;
   talentId: TalentId | null;
   modifiers: TalentModifiers;
+  level: number;
+  xp: number;
+  skillPoints: number;
+  learnedSkillIds: SkillId[];
 }
 
 export interface DmTurnResponse {
@@ -74,6 +106,36 @@ export interface TurnRandomEvent {
   tempItem: string | null;
 }
 
+export interface ActiveQuest {
+  id: string;
+  npcName: string;
+  title: string;
+  description: string;
+  targetItem: string;
+  targetKeywords: string[];
+  rewardCoins: number;
+  rewardItem: string | null;
+  clueHint: string;
+  acceptedTurn: number;
+}
+
+export interface QuestLogEvent {
+  type: 'accepted' | 'completed';
+  questId: string;
+  npcName: string;
+  title: string;
+  description?: string;
+  targetItem: string;
+  rewardCoins?: number;
+  rewardItem?: string | null;
+}
+
+export interface LevelUpInfo {
+  fromLevel: number;
+  toLevel: number;
+  gainedPoints: number;
+}
+
 export interface LogEntry {
   id: string;
   turn: number;
@@ -86,6 +148,9 @@ export interface LogEntry {
   choices: string[];
   unlockedAchievements?: UnlockedAchievement[];
   randomEvent?: TurnRandomEvent | null;
+  questEvent?: QuestLogEvent | null;
+  levelUp?: LevelUpInfo | null;
+  bonusForagedItem?: string | null;
 }
 
 export interface GameOverSummary {

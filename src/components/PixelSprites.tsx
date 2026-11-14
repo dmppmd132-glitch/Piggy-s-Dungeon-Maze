@@ -261,7 +261,56 @@ export const PixelItemIcon: React.FC<{ itemName: string; className?: string }> =
     );
   }
 
-  if (lower.includes('鑰') || lower.includes('金') || lower.includes('寶') || lower.includes('幣')) {
+  if (lower.includes('鹽') || lower.includes('salt')) {
+    return (
+      <svg viewBox="0 0 16 16" shapeRendering="crispEdges" className={className} aria-hidden="true">
+        <rect x="6" y="2" width="4" height="2" fill="#b0bec5" />
+        <rect x="4" y="4" width="8" height="9" fill="#d7e4eb" />
+        <rect x="5" y="5" width="6" height="7" fill="#ffffff" />
+        <rect x="6" y="6" width="2" height="2" fill="#bce3fa" />
+        <rect x="9" y="8" width="2" height="2" fill="#d7e4eb" />
+      </svg>
+    );
+  }
+
+  if (lower.includes('羅盤') || lower.includes('懷錶') || lower.includes('錶')) {
+    return (
+      <svg viewBox="0 0 16 16" shapeRendering="crispEdges" className={className} aria-hidden="true">
+        <rect x="7" y="1" width="2" height="2" fill="#d99b26" />
+        <rect x="4" y="3" width="8" height="10" fill="#f5b041" />
+        <rect x="3" y="4" width="10" height="8" fill="#f5b041" />
+        <rect x="5" y="4" width="6" height="8" fill="#f7efe2" />
+        <rect x="4" y="5" width="8" height="6" fill="#f7efe2" />
+        <rect x="7" y="5" width="2" height="3" fill="#e05a47" />
+        <rect x="7" y="8" width="2" height="2" fill="#3a6ea5" />
+      </svg>
+    );
+  }
+
+  if (lower.includes('信') || lower.includes('卷') || lower.includes('書')) {
+    return (
+      <svg viewBox="0 0 16 16" shapeRendering="crispEdges" className={className} aria-hidden="true">
+        <rect x="2" y="4" width="12" height="8" fill="#f5ebd9" />
+        <rect x="3" y="5" width="10" height="6" fill="#e6d3b3" />
+        <rect x="4" y="5" width="8" height="2" fill="#f5ebd9" />
+        <rect x="7" y="7" width="2" height="2" fill="#d93829" />
+      </svg>
+    );
+  }
+
+  if (lower.includes('茶') || lower.includes('薄荷') || lower.includes('葉') || lower.includes('草')) {
+    return (
+      <svg viewBox="0 0 16 16" shapeRendering="crispEdges" className={className} aria-hidden="true">
+        <rect x="7" y="2" width="4" height="3" fill="#7ce06b" />
+        <rect x="5" y="4" width="6" height="5" fill="#58b947" />
+        <rect x="3" y="7" width="6" height="4" fill="#3f8f34" />
+        <rect x="5" y="11" width="2" height="3" fill="#8b5a34" />
+        <rect x="8" y="4" width="2" height="2" fill="#b5ff9e" />
+      </svg>
+    );
+  }
+
+  if (lower.includes('鑰') || lower.includes('金') || lower.includes('寶') || lower.includes('幣') || lower.includes('護符')) {
     return (
       <svg viewBox="0 0 16 16" shapeRendering="crispEdges" className={className} aria-hidden="true">
         <rect x="3" y="5" width="5" height="5" fill="#f5b041" />

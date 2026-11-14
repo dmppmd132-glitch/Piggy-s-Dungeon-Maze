@@ -1,6 +1,7 @@
 import React, { useMemo } from 'react';
 import { RefreshCw, Sparkles } from 'lucide-react';
 import type { GamePhase } from '../types/game';
+import type { SeasonId, TimeOfDayId } from '../utils/worldCycle';
 
 type BiomeType =
   | 'mud_village'
@@ -103,6 +104,8 @@ interface PixelSceneCanvasProps {
   hp: number;
   hunger: number;
   variationSeed: number;
+  timeId?: TimeOfDayId;
+  seasonId?: SeasonId;
   onRedrawScene: () => void;
 }
 
@@ -113,6 +116,8 @@ export const PixelSceneCanvas: React.FC<PixelSceneCanvasProps> = React.memo(({
   hp,
   hunger,
   variationSeed,
+  timeId = 'dawn',
+  seasonId = 'spring',
   onRedrawScene,
 }) => {
   const scene = useMemo(
@@ -179,7 +184,19 @@ export const PixelSceneCanvas: React.FC<PixelSceneCanvasProps> = React.memo(({
     },
   };
 
-  const p = palettes[scene.biome];
+  const basePalette = palettes[scene.biome];
+  const p =
+    scene.biome !== 'truffle_cavern' && scene.biome !== 'gameover'
+      ? timeId === 'night'
+        ? { ...basePalette, skyTop: '#0d111c', skyBot: '#1b2236' }
+        : timeId === 'dusk'
+        ? { ...basePalette, skyTop: '#2b1c2e', skyBot: '#5e332c' }
+        : timeId === 'day'
+        ? { ...basePalette, skyTop: '#2b5575', skyBot: '#5989ab' }
+        : basePalette
+      : basePalette;
+  const seasonTint =
+    seasonId === 'winter' ? '#dbe8f5' : seasonId === 'autumn' ? '#f5b041' : '#f7e3a1';
 
   return (
     <div className="pixel-panel p-3 flex flex-col gap-3">
@@ -214,10 +231,12 @@ export const PixelSceneCanvas: React.FC<PixelSceneCanvasProps> = React.memo(({
           <rect y="36" width="160" height="32" fill={p.skyBot} />
 
           {/* Moon / Sun / Lantern light */}
-          {scene.biome === 'wolf_ambush' || scene.biome === 'gameover' ? (
+          {scene.biome === 'wolf_ambush' || scene.biome === 'gameover' || timeId === 'night' ? (
             <g>
               <rect x={122 - (variationSeed % 3) * 6} y="10" width="14" height="14" fill="#f2e6b6" />
               <rect x={124 - (variationSeed % 3) * 6} y="12" width="10" height="10" fill="#fff8dc" />
+              <rect x={18 + starOffset} y="10" width="1" height="1" fill="#ffffff" />
+              <rect x={70 + (starOffset % 15)} y="16" width="1" height="1" fill="#f7e3a1" />
             </g>
           ) : scene.biome === 'truffle_cavern' ? (
             <g>
@@ -234,10 +253,13 @@ export const PixelSceneCanvas: React.FC<PixelSceneCanvasProps> = React.memo(({
             </g>
           ) : (
             <g>
-              {/* Stars / Floating sparkles */}
-              <rect x={18 + starOffset} y="10" width="2" height="2" fill="#f7e3a1" />
+              {/* Sun / Seasonal Floating Sparkles */}
+              {timeId === 'day' && (
+                <rect x={126 - (variationSeed % 3) * 5} y="10" width="12" height="12" fill="#ffd95a" />
+              )}
+              <rect x={18 + starOffset} y="10" width="2" height="2" fill={seasonTint} />
               <rect x={68 + (starOffset % 15)} y="16" width="1" height="1" fill="#ffffff" />
-              <rect x={115 - (starOffset % 20)} y="8" width="2" height="2" fill="#f7e3a1" />
+              <rect x={115 - (starOffset % 20)} y="8" width="2" height="2" fill={seasonTint} />
             </g>
           )}
 
