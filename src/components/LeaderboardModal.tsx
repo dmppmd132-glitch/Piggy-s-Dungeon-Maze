@@ -1,7 +1,12 @@
 import React, { useEffect, useState } from 'react';
 import type { User } from 'firebase/auth';
 import { Check, LogIn, LogOut, Trophy, Upload, UserPen, X } from 'lucide-react';
-import { signInWithGoogle, signOutPlayer } from '../firebase';
+import {
+  formatFirebaseAuthError,
+  getAuthEnvironmentWarning,
+  signInWithGoogle,
+  signOutPlayer,
+} from '../firebase';
 import {
   subscribeLeaderboard,
   submitLeaderboardScore,
@@ -69,13 +74,15 @@ export const LeaderboardModal: React.FC<LeaderboardModalProps> = ({
 
   if (!isOpen) return null;
 
+  const envWarning = !user ? getAuthEnvironmentWarning() : null;
+
   const handleLogin = async () => {
     setStatusNote(null);
     try {
       await signInWithGoogle();
     } catch (err) {
-      const msg = err instanceof Error ? err.message : '登入失敗，請稍後再試。';
-      setStatusNote(`登入未完成：${msg}`);
+      const host = typeof window !== 'undefined' ? window.location.hostname : undefined;
+      setStatusNote(formatFirebaseAuthError(err, host));
     }
   };
 
@@ -268,8 +275,14 @@ export const LeaderboardModal: React.FC<LeaderboardModalProps> = ({
           </form>
         </div>
 
+        {envWarning && (
+          <div className="pixel-panel-inner border-[#e59838] bg-[#291e12] px-3 py-2 text-xs text-[#ffd95a] leading-relaxed">
+            {envWarning}
+          </div>
+        )}
+
         {statusNote && (
-          <div className="pixel-panel-inner border-[#d99b26] px-3 py-2 text-xs text-[#ffd95a]">
+          <div className="pixel-panel-inner border-[#d99b26] px-3 py-2 text-xs text-[#ffd95a] leading-relaxed">
             {statusNote}
           </div>
         )}
