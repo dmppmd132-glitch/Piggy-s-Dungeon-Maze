@@ -1,12 +1,17 @@
 import React from 'react';
-import { ArrowDown, Check, Lock, Sparkles, X } from 'lucide-react';
+import { ArrowDown, Check, Crown, Lock, Sparkles, X } from 'lucide-react';
 import {
+  canLearnMastery,
   canLearnSkill,
+  getTotalMasteryRanks,
   getXpRequiredForNextLevel,
+  isSkillTreeMastered,
+  MASTERY_DEFINITIONS,
+  normalizeMasteryRanks,
   SKILL_BRANCHES,
   SKILL_TREE_NODES,
 } from '../utils/skillTree';
-import type { SkillId } from '../types/game';
+import type { MasteryId, MasteryRanks, SkillId } from '../types/game';
 
 interface SkillTreeModalProps {
   isOpen: boolean;
@@ -15,8 +20,10 @@ interface SkillTreeModalProps {
   xp: number;
   skillPoints: number;
   learnedSkillIds: SkillId[];
+  masteryRanks?: Partial<MasteryRanks> | null;
   canSpendPoints: boolean;
   onLearnSkill: (skillId: SkillId) => void;
+  onLearnMastery: (masteryId: MasteryId) => void;
 }
 
 export const SkillTreeModal: React.FC<SkillTreeModalProps> = ({
@@ -26,12 +33,18 @@ export const SkillTreeModal: React.FC<SkillTreeModalProps> = ({
   xp,
   skillPoints,
   learnedSkillIds,
+  masteryRanks,
   canSpendPoints,
   onLearnSkill,
+  onLearnMastery,
 }) => {
   if (!isOpen) return null;
 
   const nextLevelXp = getXpRequiredForNextLevel(level);
+  const normalizedMastery = normalizeMasteryRanks(masteryRanks);
+  const totalMastery = getTotalMasteryRanks(normalizedMastery);
+  const treeMastered = isSkillTreeMastered(learnedSkillIds);
+  const canInvestMastery = canSpendPoints && canLearnMastery(learnedSkillIds, skillPoints);
 
   return (
     <div
@@ -50,7 +63,8 @@ export const SkillTreeModal: React.FC<SkillTreeModalProps> = ({
                 小豬冒險技能樹
               </h2>
               <p className="text-[11px] sm:text-xs text-[#cbb89e] font-num">
-                Lv.{level}（XP {xp}/{nextLevelXp}）· 已領悟 {learnedSkillIds.length}/{SKILL_TREE_NODES.length} · 技能點：
+                Lv.{level}（XP {xp}/{nextLevelXp}）· 已領悟 {learnedSkillIds.length}/{SKILL_TREE_NODES.length}
+                {totalMastery > 0 ? ` · 專精 +${totalMastery}` : ''} · 技能點：
                 <span className={skillPoints > 0 ? 'text-[#ffd95a] font-bold' : 'text-[#cbb89e]'}>
                   {skillPoints}
                 </span>
@@ -68,11 +82,81 @@ export const SkillTreeModal: React.FC<SkillTreeModalProps> = ({
           </button>
         </div>
 
-        {/* Body: 3 Branches */}
+        {/* Body: Mastery Banner + 3 Branches + Unlimited Endgame Mastery */}
         <div className="p-4 overflow-y-auto rpg-scroll space-y-4">
           {skillPoints > 0 && canSpendPoints && (
             <div className="pixel-panel-inner border-[#d99b26] px-3.5 py-2.5 text-xs text-[#ffd95a]">
-              小豬升級了！目前有 <span className="font-num font-bold">{skillPoints}</span> 點技能點數，點擊下方「可領悟」的技能卡片即可習得被動加成。
+              {treeMastered ? (
+                <>
+                  技能樹已全數領悟！目前有 <span className="font-num font-bold">{skillPoints}</span> 點技能點數，可投資至下方「巔峰無限專精」繼續無限強化小豬！
+                </>
+              ) : (
+                <>
+                  小豬升級了！目前有 <span className="font-num font-bold">{skillPoints}</span> 點技能點數，點擊下方「可領悟」的技能卡片即可習得被動加成。
+                </>
+              )}
+            </div>
+          )}
+
+          {treeMastered && (
+            <div className="pixel-panel-inner border-[#d99b26] p-3.5 space-y-3 bg-[#21180f]">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#4a3525] pb-2">
+                <div className="flex items-center gap-2">
+                  <Crown className="w-4 h-4 text-[#ffd95a] shrink-0" />
+                  <h3 className="font-pixel text-sm text-[#ffd95a]">
+                    巔峰無限專精（全技能制霸解鎖）
+                  </h3>
+                </div>
+                <span className="text-[11px] font-num text-[#cbb89e]">
+                  累計專精等級：Lv.{totalMastery}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                {MASTERY_DEFINITIONS.map((mastery) => {
+                  const currentRank = normalizedMastery[mastery.id];
+                  return (
+                    <div
+                      key={mastery.id}
+                      className={`border p-3 space-y-1.5 ${
+                        canInvestMastery
+                          ? 'bg-[#232b1c] border-[#7ce06b]'
+                          : 'bg-[#17110d] border-[#4a3525]'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-pixel text-xs text-[#f5ebd9]">
+                          {mastery.name}
+                        </span>
+                        <span
+                          className="text-[11px] font-num font-bold"
+                          style={{ color: mastery.accentColor }}
+                        >
+                          Lv.{currentRank}
+                        </span>
+                      </div>
+                      <p
+                        className="text-[11px] font-num font-bold"
+                        style={{ color: mastery.accentColor }}
+                      >
+                        {mastery.effectPerRank}
+                      </p>
+                      <p className="text-xs text-[#d6c4ab] leading-relaxed">
+                        {mastery.description}
+                      </p>
+                      {canInvestMastery && (
+                        <button
+                          type="button"
+                          onClick={() => onLearnMastery(mastery.id)}
+                          className="pixel-btn pixel-btn-primary w-full min-h-[40px] py-2 px-2.5 text-xs font-bold mt-1 cursor-pointer"
+                        >
+                          消耗 1 技能點強化（→ Lv.{currentRank + 1}）
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           )}
 
@@ -178,6 +262,20 @@ export const SkillTreeModal: React.FC<SkillTreeModalProps> = ({
               );
             })}
           </div>
+
+          {!treeMastered && (
+            <div className="pixel-panel-inner border-[#4a3525] p-3 flex items-start gap-2.5 text-xs text-[#b8a58d]">
+              <Lock className="w-4 h-4 text-[#ffd95a] shrink-0 mt-0.5" />
+              <div className="space-y-0.5">
+                <p className="font-pixel text-[#f5ebd9]">
+                  巔峰無限專精（已領悟 {learnedSkillIds.length}/{SKILL_TREE_NODES.length} 項後解鎖）
+                </p>
+                <p className="leading-relaxed">
+                  當上方 15 項技能全數領悟完畢後，後續每次升級獲得的技能點數都可無限投資於「肉體鍛鍊」、「聚寶直覺」與「戰鬥本能」，永不浪費！
+                </p>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>

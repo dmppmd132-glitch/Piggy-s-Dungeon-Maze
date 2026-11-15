@@ -94,12 +94,20 @@ import {
   advanceLevelAndXp,
   calculateSkillModifiers,
   calculateTurnXpGain,
+  canLearnMastery,
   canLearnSkill,
+  DEFAULT_MASTERY_RANKS,
   getAvailableSkillsToLearn,
+  getMasteryById,
   getSkillById,
+  getTotalMasteryRanks,
   getXpRequiredForNextLevel,
+  isSkillTreeMastered,
+  MASTERY_DEFINITIONS,
+  normalizeMasteryRanks,
   rollSkillBonusForageItem,
   SKILL_BRANCHES,
+  SKILL_TREE_NODES,
 } from './utils/skillTree';
 import {
   calculateTradeDiscountSavings,
@@ -122,6 +130,7 @@ import type {
   GamePhase,
   LevelUpInfo,
   LogEntry,
+  MasteryId,
   NpcAffinityEvent,
   PlayerStats,
   QuestLogEvent,
@@ -144,6 +153,7 @@ const INITIAL_STATS: PlayerStats = {
   xp: 0,
   skillPoints: 0,
   learnedSkillIds: [],
+  masteryRanks: DEFAULT_MASTERY_RANKS,
 };
 
 const INITIAL_IMAGE_PROMPT =
@@ -230,6 +240,7 @@ function loadSavedAdventure(): SavedAdventureState | null {
         learnedSkillIds: Array.isArray(parsed.stats.learnedSkillIds)
           ? parsed.stats.learnedSkillIds
           : [],
+        masteryRanks: normalizeMasteryRanks(parsed.stats.masteryRanks),
       },
       turn: parsed.turn,
       logs: parsed.logs,
@@ -468,7 +479,10 @@ export default function App() {
       const baseStats = isStart ? overrideStartStats ?? stats : stats;
       const nextTurnNumber = isStart ? 1 : turn + 1;
       const nextWorldCycle = getWorldCycleState(nextTurnNumber);
-      const turnSkillMods = calculateSkillModifiers(baseStats.learnedSkillIds);
+      const turnSkillMods = calculateSkillModifiers(
+        baseStats.learnedSkillIds,
+        baseStats.masteryRanks
+      );
       const rolledEvent = isStart
         ? null
         : rollRandomEvent(nextTurnNumber, nextWorldCycle, turnSkillMods.surpriseEventBonusChance);
@@ -758,7 +772,22 @@ export default function App() {
 
         const eventHpDelta = rolledEvent?.event.hpDelta ?? 0;
         const totalHpDelta = isStart ? 0 : rawHpDelta + eventHpDelta - starvationDamage;
-        const nextHp = clamp(baseStats.hp + totalHpDelta, 0, baseStats.maxHp);
+        let rawNextHp = baseStats.hp + totalHpDelta;
+        let cheatDeathTriggered = false;
+        if (
+          !isStart &&
+          rawNextHp <= 0 &&
+          baseStats.hp > 1 &&
+          turnSkillMods.cheatDeathChance > 0 &&
+          Math.random() < turnSkillMods.cheatDeathChance
+        ) {
+          rawNextHp = 1;
+          cheatDeathTriggered = true;
+        }
+        if (!isStart && rawNextHp > 0 && turnSkillMods.regenHpPerTurn > 0) {
+          rawNextHp += turnSkillMods.regenHpPerTurn;
+        }
+        const nextHp = clamp(rawNextHp, 0, baseStats.maxHp);
         const appliedHpChange = nextHp - baseStats.hp;
 
         // Match NPC interaction & apply high-affinity trade discount / clues
@@ -834,7 +863,9 @@ export default function App() {
             if (removeIdx !== -1) {
               nextInventory.splice(removeIdx, 1);
             }
-            let questRewardCoins = currentQuest.rewardCoins;
+            let questRewardCoins = Math.round(
+              currentQuest.rewardCoins * turnSkillMods.questRewardMultiplier
+            );
             if (baseStats.modifiers.coinGainMultiplier > 1) {
               questRewardCoins = Math.round(
                 questRewardCoins * baseStats.modifiers.coinGainMultiplier
@@ -900,6 +931,9 @@ export default function App() {
             } else if (delta === 0) {
               delta = inferFallbackAffinityDelta(cleanAction, dm.story);
             }
+            if (turnSkillMods.npcAffinityBonusPerInteraction > 0) {
+              delta += turnSkillMods.npcAffinityBonusPerInteraction;
+            }
 
             const prevScore = nextNpcAffinities[targetNpc.id] ?? targetNpc.initialAffinity;
             const updatedScore = clamp(prevScore + delta, 0, 100);
@@ -927,7 +961,8 @@ export default function App() {
         const bonusForagedItem = !isStart
           ? rollSkillBonusForageItem(
               turnSkillMods.itemDiscoveryBonus,
-              Boolean(actuallyGained || rolledEvent?.event.tempItem)
+              Boolean(actuallyGained || rolledEvent?.event.tempItem),
+              baseStats.learnedSkillIds.includes('foraging_5')
             )
           : null;
         if (bonusForagedItem) {
@@ -974,13 +1009,17 @@ export default function App() {
           alreadyUnlockedInRun: alreadyInRun,
         });
 
-        const gainedXp = calculateTurnXpGain({
+        const rawGainedXp = calculateTurnXpGain({
           isStart,
           foundItem: Boolean(actuallyGained || bonusForagedItem || rolledEvent?.event.tempItem),
           gainedCoins: appliedCoinsChange > 0,
           completedQuest: turnQuestEvent?.type === 'completed',
           unlockedAchievementsCount: newlyUnlocked.length,
         });
+        const gainedXp =
+          rawGainedXp > 0
+            ? Math.max(1, Math.round(rawGainedXp * turnSkillMods.xpGainMultiplier))
+            : 0;
         const levelProgression = advanceLevelAndXp(
           baseStats.level,
           baseStats.xp,
@@ -1024,6 +1063,7 @@ export default function App() {
           levelUp: turnLevelUp,
           bonusForagedItem,
           npcAffinityEvent: turnAffinityEvent,
+          cheatDeathTriggered,
         };
 
         const nextUnlockedRun = isStart
@@ -1211,10 +1251,11 @@ export default function App() {
     const node = getSkillById(skillId);
     if (!node) return;
 
-    const prevMaxHpBonus = calculateSkillModifiers(stats.learnedSkillIds).maxHpBonus;
+    const prevMods = calculateSkillModifiers(stats.learnedSkillIds, stats.masteryRanks);
     const nextLearned = [...stats.learnedSkillIds, skillId];
-    const nextMaxHpBonus = calculateSkillModifiers(nextLearned).maxHpBonus;
-    const gainedMaxHp = Math.max(0, nextMaxHpBonus - prevMaxHpBonus);
+    const nextMods = calculateSkillModifiers(nextLearned, stats.masteryRanks);
+    const gainedMaxHp = Math.max(0, nextMods.maxHpBonus - prevMods.maxHpBonus);
+    const gainedMaxHunger = Math.max(0, nextMods.maxHungerBonus - prevMods.maxHungerBonus);
 
     retroAudio.playAchievement();
     setStats((prev) => ({
@@ -1223,8 +1264,38 @@ export default function App() {
       learnedSkillIds: nextLearned,
       maxHp: prev.maxHp + gainedMaxHp,
       hp: Math.min(prev.maxHp + gainedMaxHp, prev.hp + gainedMaxHp),
+      maxHunger: prev.maxHunger + gainedMaxHunger,
+      hunger: Math.min(prev.maxHunger + gainedMaxHunger, prev.hunger + gainedMaxHunger),
     }));
     setSkillNotice(`已領悟被動技能「${node.name}」（${node.effectLabel}）！`);
+  };
+
+  const handleLearnMastery = (masteryId: MasteryId) => {
+    if (phase !== 'PLAYING' || isLoading) return;
+    if (!canLearnMastery(stats.learnedSkillIds, stats.skillPoints)) return;
+    const masteryDef = getMasteryById(masteryId);
+    if (!masteryDef) return;
+
+    const currentRanks = normalizeMasteryRanks(stats.masteryRanks);
+    const prevMods = calculateSkillModifiers(stats.learnedSkillIds, currentRanks);
+    const nextRanks = {
+      ...currentRanks,
+      [masteryId]: currentRanks[masteryId] + 1,
+    };
+    const nextMods = calculateSkillModifiers(stats.learnedSkillIds, nextRanks);
+    const gainedMaxHp = Math.max(0, nextMods.maxHpBonus - prevMods.maxHpBonus);
+
+    retroAudio.playAchievement();
+    setStats((prev) => ({
+      ...prev,
+      skillPoints: prev.skillPoints - 1,
+      masteryRanks: nextRanks,
+      maxHp: prev.maxHp + gainedMaxHp,
+      hp: Math.min(prev.maxHp + gainedMaxHp, prev.hp + gainedMaxHp),
+    }));
+    setSkillNotice(
+      `已強化巔峰專精「${masteryDef.name} Lv.${nextRanks[masteryId]}」（${masteryDef.effectPerRank}）！`
+    );
   };
 
   const handleSelectItem = (itemName: string) => {
@@ -1324,12 +1395,24 @@ export default function App() {
     [activeQuest, stats.inventory]
   );
   const skillModifiers = useMemo(
-    () => calculateSkillModifiers(stats.learnedSkillIds),
-    [stats.learnedSkillIds]
+    () => calculateSkillModifiers(stats.learnedSkillIds, stats.masteryRanks),
+    [stats.learnedSkillIds, stats.masteryRanks]
   );
   const availableSkillsToLearn = useMemo(
     () => getAvailableSkillsToLearn(stats.learnedSkillIds, stats.skillPoints),
     [stats.learnedSkillIds, stats.skillPoints]
+  );
+  const isTreeMastered = useMemo(
+    () => isSkillTreeMastered(stats.learnedSkillIds),
+    [stats.learnedSkillIds]
+  );
+  const normalizedMasteryRanks = useMemo(
+    () => normalizeMasteryRanks(stats.masteryRanks),
+    [stats.masteryRanks]
+  );
+  const totalMasteryRanks = useMemo(
+    () => getTotalMasteryRanks(normalizedMasteryRanks),
+    [normalizedMasteryRanks]
   );
   const nextLevelXp = useMemo(
     () => getXpRequiredForNextLevel(stats.level),
@@ -1839,7 +1922,8 @@ export default function App() {
               </div>
               <div className="flex items-center justify-between text-[11px]">
                 <span className="text-[#b8a58d]">
-                  已領悟：{stats.learnedSkillIds.length} 項被動技能
+                  已領悟：{stats.learnedSkillIds.length}/{SKILL_TREE_NODES.length} 項
+                  {totalMasteryRanks > 0 ? ` · 專精 +${totalMasteryRanks}` : ''}
                 </span>
                 <span
                   className={`font-num font-bold ${
@@ -1857,66 +1941,135 @@ export default function App() {
               </div>
             )}
 
-            {/* Interactive Level-Up Passive Skill Picker */}
-            {phase === 'PLAYING' && stats.skillPoints > 0 && availableSkillsToLearn.length > 0 && (
-              <div className="pixel-panel-inner border-[#7ce06b] p-3 space-y-2">
-                <div className="flex items-center justify-between text-xs">
-                  <span className="font-pixel text-[#7ce06b] flex items-center gap-1.5">
-                    <ArrowUpCircle className="w-4 h-4 shrink-0" />
-                    <span>小豬升級！選擇領悟被動技能</span>
-                  </span>
-                  <span className="font-num text-[11px] text-[#ffd95a]">
-                    剩 {stats.skillPoints} 點
-                  </span>
-                </div>
-                <div className="space-y-1.5 max-h-[210px] overflow-y-auto rpg-scroll pr-1">
-                  {availableSkillsToLearn.map((skill) => {
-                    const branchMeta = SKILL_BRANCHES.find((b) => b.id === skill.branch);
-                    return (
-                      <div
-                        key={skill.id}
-                        className="bg-[#17110d] border border-[#3c2b1e] p-2 flex items-center justify-between gap-2"
-                      >
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-1.5 text-xs">
-                            <span
-                              className="text-[10px] font-bold shrink-0"
-                              style={{ color: branchMeta?.accentColor ?? '#ffd95a' }}
+            {/* Interactive Level-Up Passive Skill Picker or Endgame Mastery Picker */}
+            {phase === 'PLAYING' &&
+              stats.skillPoints > 0 &&
+              (availableSkillsToLearn.length > 0 || isTreeMastered) && (
+                <div className="pixel-panel-inner border-[#7ce06b] p-3 space-y-2">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-pixel text-[#7ce06b] flex items-center gap-1.5">
+                      <ArrowUpCircle className="w-4 h-4 shrink-0" />
+                      <span>
+                        {availableSkillsToLearn.length > 0
+                          ? '小豬升級！選擇領悟被動技能'
+                          : '全技能制霸！投資巔峰無限專精'}
+                      </span>
+                    </span>
+                    <span className="font-num text-[11px] text-[#ffd95a]">
+                      剩 {stats.skillPoints} 點
+                    </span>
+                  </div>
+                  <div className="space-y-1.5 max-h-[210px] overflow-y-auto rpg-scroll pr-1">
+                    {availableSkillsToLearn.length > 0
+                      ? availableSkillsToLearn.map((skill) => {
+                          const branchMeta = SKILL_BRANCHES.find((b) => b.id === skill.branch);
+                          return (
+                            <div
+                              key={skill.id}
+                              className="bg-[#17110d] border border-[#3c2b1e] p-2 flex items-center justify-between gap-2"
                             >
-                              [{branchMeta?.name}]
-                            </span>
-                            <span className="font-bold text-[#f5ebd9] truncate">
-                              {skill.name}
-                            </span>
-                          </div>
-                          <p className="text-[11px] text-[#9fd67a] font-num truncate">
-                            {skill.effectLabel}
-                          </p>
-                        </div>
-                        <button
-                          type="button"
-                          disabled={isLoading}
-                          onClick={() => handleLearnSkill(skill.id)}
-                          className="pixel-btn pixel-btn-primary px-2.5 py-1 text-[11px] font-bold shrink-0 cursor-pointer disabled:opacity-50"
-                        >
-                          領悟
-                        </button>
-                      </div>
-                    );
-                  })}
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-1.5 text-xs">
+                                  <span
+                                    className="text-[10px] font-bold shrink-0"
+                                    style={{ color: branchMeta?.accentColor ?? '#ffd95a' }}
+                                  >
+                                    [{branchMeta?.name}]
+                                  </span>
+                                  <span className="font-bold text-[#f5ebd9] truncate">
+                                    {skill.name}
+                                  </span>
+                                </div>
+                                <p className="text-[11px] text-[#9fd67a] font-num truncate">
+                                  {skill.effectLabel}
+                                </p>
+                              </div>
+                              <button
+                                type="button"
+                                disabled={isLoading}
+                                onClick={() => handleLearnSkill(skill.id)}
+                                className="pixel-btn pixel-btn-primary px-2.5 py-1 text-[11px] font-bold shrink-0 cursor-pointer disabled:opacity-50"
+                              >
+                                領悟
+                              </button>
+                            </div>
+                          );
+                        })
+                      : MASTERY_DEFINITIONS.map((mastery) => {
+                          const rank = normalizedMasteryRanks[mastery.id];
+                          return (
+                            <div
+                              key={mastery.id}
+                              className="bg-[#17110d] border border-[#4a3525] p-2 flex items-center justify-between gap-2"
+                            >
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-1.5 text-xs">
+                                  <span
+                                    className="text-[10px] font-bold shrink-0"
+                                    style={{ color: mastery.accentColor }}
+                                  >
+                                    [專精 Lv.{rank}]
+                                  </span>
+                                  <span className="font-bold text-[#f5ebd9] truncate">
+                                    {mastery.name}
+                                  </span>
+                                </div>
+                                <p className="text-[11px] text-[#9fd67a] font-num truncate">
+                                  {mastery.effectPerRank}
+                                </p>
+                              </div>
+                              <button
+                                type="button"
+                                disabled={isLoading}
+                                onClick={() => handleLearnMastery(mastery.id)}
+                                className="pixel-btn pixel-btn-primary px-2.5 py-1 text-[11px] font-bold shrink-0 cursor-pointer disabled:opacity-50"
+                              >
+                                強化
+                              </button>
+                            </div>
+                          );
+                        })}
+                  </div>
                 </div>
-              </div>
-            )}
+              )}
 
             {/* Learned Passive Skills List */}
             <div className="space-y-1.5">
               <div className="text-xs font-medium text-[#cbb89e]">已領悟能力</div>
-              {stats.learnedSkillIds.length === 0 ? (
+              {stats.learnedSkillIds.length === 0 && totalMasteryRanks === 0 ? (
                 <div className="pixel-panel-inner p-3 text-xs text-[#9c8a74] leading-relaxed">
                   尚未領悟任何被動技能。每次冒險行動都能累積經驗值，升級後即可挑選強化能力！
                 </div>
               ) : (
                 <div className="space-y-1.5 max-h-[200px] overflow-y-auto rpg-scroll pr-1">
+                  {MASTERY_DEFINITIONS.map((mastery) => {
+                    const rank = normalizedMasteryRanks[mastery.id];
+                    if (rank <= 0) return null;
+                    return (
+                      <div
+                        key={`mastery-${mastery.id}`}
+                        className="pixel-panel-inner px-2.5 py-2 flex items-start justify-between gap-2 border-[#d99b26]"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5 text-xs">
+                            <span
+                              className="text-[10px] font-bold shrink-0"
+                              style={{ color: mastery.accentColor }}
+                            >
+                              巔峰專精
+                            </span>
+                            <span className="font-bold text-[#ffd95a] truncate">
+                              {mastery.name} Lv.{rank}
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-[#e6d5b8] mt-0.5 leading-snug">
+                            {mastery.effectPerRank}
+                          </p>
+                        </div>
+                        <Check className="w-3.5 h-3.5 text-[#ffd95a] shrink-0 mt-0.5" />
+                      </div>
+                    );
+                  })}
                   {stats.learnedSkillIds.map((id) => {
                     const skill = getSkillById(id);
                     if (!skill) return null;
@@ -2294,6 +2447,17 @@ export default function App() {
                         </p>
                         <p className="text-[#dfd4c1]">
                           獲得 <span className="font-num text-[#ffd95a] font-bold">+{entry.levelUp.gainedPoints}</span> 點技能點數！請於左側「冒險技能面板」選擇領悟新被動技能。
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {entry.cheatDeathTriggered && (
+                    <div className="px-3 py-2 border bg-[#2c1512] border-[#ff7b6b] flex items-start gap-2.5 text-xs">
+                      <Shield className="w-4 h-4 text-[#ffd95a] shrink-0 mt-0.5" />
+                      <div className="min-w-0">
+                        <p className="font-pixel text-[#ffd95a]">
+                          不死泥豬王發動！小豬在致命危機中硬是鎖住 1 HP 奇蹟生還！
                         </p>
                       </div>
                     </div>
@@ -3108,8 +3272,10 @@ export default function App() {
         xp={stats.xp}
         skillPoints={stats.skillPoints}
         learnedSkillIds={stats.learnedSkillIds}
+        masteryRanks={stats.masteryRanks}
         canSpendPoints={phase === 'PLAYING' && !isLoading}
         onLearnSkill={handleLearnSkill}
+        onLearnMastery={handleLearnMastery}
       />
       <OfflineIndicator />
     </div>

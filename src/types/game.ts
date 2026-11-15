@@ -28,12 +28,26 @@ export type SkillId =
   | 'survival_1'
   | 'survival_2'
   | 'survival_3'
+  | 'survival_4'
+  | 'survival_5'
   | 'foraging_1'
   | 'foraging_2'
   | 'foraging_3'
+  | 'foraging_4'
+  | 'foraging_5'
   | 'combat_1'
   | 'combat_2'
-  | 'combat_3';
+  | 'combat_3'
+  | 'combat_4'
+  | 'combat_5';
+
+export type MasteryId = 'vitality' | 'fortune' | 'focus';
+
+export interface MasteryRanks {
+  vitality: number;
+  fortune: number;
+  focus: number;
+}
 
 export interface PlayerStats {
   hp: number;
@@ -49,6 +63,7 @@ export interface PlayerStats {
   xp: number;
   skillPoints: number;
   learnedSkillIds: SkillId[];
+  masteryRanks?: MasteryRanks;
 }
 
 export interface DmTurnResponse {
@@ -171,6 +186,7 @@ export interface LogEntry {
   levelUp?: LevelUpInfo | null;
   bonusForagedItem?: string | null;
   npcAffinityEvent?: NpcAffinityEvent | null;
+  cheatDeathTriggered?: boolean;
 }
 
 export interface GameOverSummary {
