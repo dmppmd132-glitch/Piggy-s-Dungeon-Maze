@@ -218,6 +218,14 @@ export type LegacyUpgradesMap = Record<LegacyUpgradeId, number>;
 
 export type FoodBuffId = 'warm_soup' | 'spicy_roast' | 'herbal_tea' | 'truffle_bisque';
 
+export interface CookingJournalEntry {
+  dishName: string;
+  latestReview: string;
+  ingredientsUsed: string;
+  cookedAt: string;
+  cookCount: number;
+}
+
 export interface MetaProgressionState {
   trufflePoints: number;
   totalRuns: number;
@@ -229,6 +237,7 @@ export interface MetaProgressionState {
   reachedRegionIds: RegionId[];
   befriendedNpcIds: NpcId[];
   cookedRecipeCounts?: Partial<Record<FoodBuffId, number>>;
+  cookingJournal?: Partial<Record<FoodBuffId, CookingJournalEntry>>;
 }
 
 export interface ActiveFoodBuff {
@@ -275,6 +284,16 @@ export interface SeasonalQuestLogEvent {
   expiresAtTurn?: number;
 }
 
+export interface CompanionLogEvent {
+  npcId: NpcId;
+  npcName: string;
+  companionTitle: string;
+  message: string;
+  giftedItem?: string | null;
+  coinsBonus?: number;
+  hpBonus?: number;
+}
+
 export type BlackMarketItemCategory = 'ingredient' | 'tonic' | 'gear' | 'mystery';
 
 export interface BlackMarketOffer {
@@ -316,6 +335,7 @@ export interface LogEntry {
   regionName?: string;
   expiredBuffNames?: string[];
   seasonalEvent?: SeasonalQuestLogEvent | null;
+  companionEvent?: CompanionLogEvent | null;
 }
 
 export interface GameOverSummary {

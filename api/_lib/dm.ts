@@ -203,6 +203,11 @@ export interface TurnRequestBody {
     targetItem: string;
     remainingTurns?: number;
   } | null;
+  companion?: {
+    npcName: string;
+    title: string;
+    perkLabel: string;
+  } | null;
 }
 
 export interface EpitaphRequestBody {
@@ -434,6 +439,11 @@ function buildTurnPrompt(body: TurnRequestBody): {
     regionPrompt += '\n';
   }
 
+  const companionText =
+    !isStart && body.companion
+      ? `\n- 森林小跟班：${body.companion.npcName}（${body.companion.title}：${body.companion.perkLabel}）正陪在小豬身旁冒險，可適時描寫互動！`
+      : '';
+
   const userPrompt = isStart
     ? `【第 1 回合開局】
 狀態：HP ${stats.hp}/100｜飽食 ${stats.hunger}/100｜豬豬幣 ${stats.coins}｜背包：${stats.inventory.join('、')}
@@ -448,7 +458,7 @@ ${historySummary}
 狀態：HP ${stats.hp}/100｜飽食 ${stats.hunger}/100${stats.hunger <= 0 ? '（飢餓扣血中！）' : ''}｜豬豬幣 ${stats.coins}｜背包：${stats.inventory.join('、') || '空'}
 ${equipmentText}
 ${skillText}
-${npcAffinitiesText}${foodBuffsText}${worldCyclePrompt}${regionPrompt}${randomEventPrompt}${questPrompt}${seasonalPrompt}
+${npcAffinitiesText}${foodBuffsText}${companionText}${worldCyclePrompt}${regionPrompt}${randomEventPrompt}${questPrompt}${seasonalPrompt}
 玩家行動：「${action}」
 推進劇情、結算合理數值與道具變化，並給出 3 個新選項與英文像素場景提示詞。`;
 

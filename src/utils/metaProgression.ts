@@ -1,4 +1,5 @@
 import type {
+  CookingJournalEntry,
   FoodBuffId,
   LegacyUpgradeId,
   LegacyUpgradesMap,
@@ -120,6 +121,7 @@ export function createDefaultMetaProgression(): MetaProgressionState {
     reachedRegionIds: ['mud_village'],
     befriendedNpcIds: [],
     cookedRecipeCounts: {},
+    cookingJournal: {},
   };
 }
 
@@ -163,6 +165,38 @@ export function normalizeMetaProgression(
     }
   }
 
+  const cookingJournal: Partial<Record<FoodBuffId, CookingJournalEntry>> = {};
+  const rawJournal =
+    raw.cookingJournal && typeof raw.cookingJournal === 'object'
+      ? (raw.cookingJournal as Record<string, unknown>)
+      : {};
+  for (const recipe of COOKING_RECIPES) {
+    const entry = rawJournal[recipe.id] as Partial<CookingJournalEntry> | undefined;
+    if (entry && typeof entry === 'object' && typeof entry.latestReview === 'string') {
+      cookingJournal[recipe.id] = {
+        dishName: typeof entry.dishName === 'string' ? entry.dishName : recipe.dishName,
+        latestReview: entry.latestReview,
+        ingredientsUsed:
+          typeof entry.ingredientsUsed === 'string'
+            ? entry.ingredientsUsed
+            : recipe.ingredientHint,
+        cookedAt: typeof entry.cookedAt === 'string' ? entry.cookedAt : '',
+        cookCount:
+          typeof entry.cookCount === 'number' && entry.cookCount > 0
+            ? Math.floor(entry.cookCount)
+            : cookedRecipeCounts[recipe.id] ?? 1,
+      };
+    } else if ((cookedRecipeCounts[recipe.id] ?? 0) > 0) {
+      cookingJournal[recipe.id] = {
+        dishName: recipe.dishName,
+        latestReview: recipe.piggyReview,
+        ingredientsUsed: recipe.ingredientHint,
+        cookedAt: '',
+        cookCount: cookedRecipeCounts[recipe.id] ?? 1,
+      };
+    }
+  }
+
   return {
     trufflePoints:
       typeof raw.trufflePoints === 'number' && raw.trufflePoints >= 0
@@ -188,6 +222,7 @@ export function normalizeMetaProgression(
       ? Array.from(new Set(raw.befriendedNpcIds as NpcId[]))
       : [],
     cookedRecipeCounts,
+    cookingJournal,
   };
 }
 

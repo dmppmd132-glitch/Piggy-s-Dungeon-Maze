@@ -30,6 +30,7 @@ import {
   Sunset,
   Swords,
   Trophy,
+  Users,
   Utensils,
   Volume2,
   VolumeX,
@@ -73,6 +74,7 @@ import {
   calculateFoodBuffModifiers,
   COOKING_RECIPES,
   findAvailableCookingRecipes,
+  generateRandomPiggyReview,
   normalizeActiveFoodBuffs,
   tickFoodBuffs,
   type AvailableCookingDish,
@@ -152,6 +154,7 @@ import {
   calculateTradeDiscountSavings,
   createInitialNpcAffinities,
   getAffinityTier,
+  getNpcById,
   inferFallbackAffinityDelta,
   matchNpcFromText,
   MUD_KINGDOM_NPCS,
@@ -159,6 +162,13 @@ import {
   pickNpcClue,
   type NpcAffinityMap,
 } from './utils/npcAffinity';
+import {
+  COMPANION_UNLOCK_AFFINITY,
+  getCompanionDefinition,
+  isCompanionUnlocked,
+  resolveCompanionCookingSynergy,
+  rollCompanionTurnSupport,
+} from './utils/companions';
 import {
   getCurrentRegionState,
   resolveBossTurnPostCall,
@@ -180,6 +190,7 @@ import type {
   AppliedDeltas,
   BlackMarketOffer,
   BlackMarketState,
+  CompanionLogEvent,
   DmTurnResponse,
   EquipSlot,
   GameOverSummary,
@@ -260,6 +271,8 @@ interface SavedAdventureState {
   activeSeasonalQuest?: ActiveSeasonalQuest | null;
   seasonalTriggeredInRun?: boolean;
   blackMarketState?: BlackMarketState;
+  activeCompanionId?: NpcId | null;
+  sharedDishLastTurn?: number;
   runTrufflePointsClaimed?: boolean;
   lastRunTruffleReward?: number;
   savedAt: string;
@@ -332,6 +345,12 @@ function loadSavedAdventure(): SavedAdventureState | null {
       activeSeasonalQuest: normalizeActiveSeasonalQuest(parsed.activeSeasonalQuest),
       seasonalTriggeredInRun: Boolean(parsed.seasonalTriggeredInRun),
       blackMarketState: normalizeBlackMarketState(parsed.blackMarketState, parsed.turn),
+      activeCompanionId:
+        typeof parsed.activeCompanionId === 'string' && getNpcById(parsed.activeCompanionId as NpcId)
+          ? (parsed.activeCompanionId as NpcId)
+          : null,
+      sharedDishLastTurn:
+        typeof parsed.sharedDishLastTurn === 'number' ? parsed.sharedDishLastTurn : 0,
       runTrufflePointsClaimed: Boolean(parsed.runTrufflePointsClaimed),
       lastRunTruffleReward:
         typeof parsed.lastRunTruffleReward === 'number' ? parsed.lastRunTruffleReward : 0,
@@ -404,6 +423,9 @@ export default function App() {
     createInitialBlackMarketState(1)
   );
   const [blackMarketNotice, setBlackMarketNotice] = useState<string | null>(null);
+  const [activeCompanionId, setActiveCompanionId] = useState<NpcId | null>(null);
+  const [sharedDishLastTurn, setSharedDishLastTurn] = useState<number>(0);
+  const [companionNotice, setCompanionNotice] = useState<string | null>(null);
   const [runTrufflePointsClaimed, setRunTrufflePointsClaimed] = useState<boolean>(false);
   const [lastRunTruffleReward, setLastRunTruffleReward] = useState<number>(0);
   const [metaProgression, setMetaProgression] = useState<MetaProgressionState>(() =>
@@ -468,6 +490,8 @@ export default function App() {
         activeSeasonalQuest,
         seasonalTriggeredInRun,
         blackMarketState,
+        activeCompanionId,
+        sharedDishLastTurn,
         runTrufflePointsClaimed,
         lastRunTruffleReward,
         savedAt: new Date().toISOString(),
@@ -498,6 +522,8 @@ export default function App() {
     activeSeasonalQuest,
     seasonalTriggeredInRun,
     blackMarketState,
+    activeCompanionId,
+    sharedDishLastTurn,
     runTrufflePointsClaimed,
     lastRunTruffleReward,
   ]);
@@ -628,6 +654,9 @@ export default function App() {
       const baseStats = isStart ? overrideStartStats ?? stats : stats;
       const baseBuffs = isStart ? [] : activeBuffs;
       const turnFoodBuffMods = calculateFoodBuffModifiers(baseBuffs);
+      const currentCompanionId = isStart ? null : activeCompanionId;
+      const turnCompanionDef = getCompanionDefinition(currentCompanionId);
+      const turnCompanionNpc = currentCompanionId ? getNpcById(currentCompanionId) ?? null : null;
       const nextTurnNumber = isStart ? 1 : turn + 1;
       const nextWorldCycle = getWorldCycleState(nextTurnNumber);
       const turnSkillMods = calculateSkillModifiers(
@@ -858,6 +887,14 @@ export default function App() {
                   remainingTurns: seasonalPre.remainingTurns,
                 }
               : null,
+            companion:
+              turnCompanionDef && turnCompanionNpc
+                ? {
+                    npcName: turnCompanionNpc.name,
+                    title: turnCompanionDef.companionTitle,
+                    perkLabel: turnCompanionDef.adventurePerkLabel,
+                  }
+                : null,
           }),
         });
 
@@ -949,11 +986,15 @@ export default function App() {
           if (
             rawHungerDelta <= 0 &&
             nextWorldCycle.modifiers.extraHungerDrain > 0 &&
-            !turnFoodBuffMods.ignoreNightExtraDrain
+            !turnFoodBuffMods.ignoreNightExtraDrain &&
+            !turnCompanionDef?.ignoreNightExtraDrain
           ) {
             rawHungerDelta -= nextWorldCycle.modifiers.extraHungerDrain;
           }
-          const totalHungerSave = equipBonuses.hungerSaveBonus + turnFoodBuffMods.hungerSaveFlat;
+          const totalHungerSave =
+            equipBonuses.hungerSaveBonus +
+            turnFoodBuffMods.hungerSaveFlat +
+            (turnCompanionDef?.hungerSaveFlat ?? 0);
           if (rawHungerDelta < 0 && totalHungerSave > 0) {
             rawHungerDelta = -Math.max(1, Math.abs(rawHungerDelta) - totalHungerSave);
           }
@@ -999,12 +1040,15 @@ export default function App() {
         if (!isStart && rawHpDelta < 0) {
           const combatMitigation = Math.floor(
             equipBonuses.defenseBonus +
+              (turnCompanionDef?.defenseBonus ?? 0) +
               (equipBonuses.attackBonus + turnFoodBuffMods.attackBonus) * 0.5
           );
           let reduced = Math.max(1, Math.abs(rawHpDelta) - combatMitigation);
           const effectiveDamageMult = Math.max(
-            0.4,
-            turnSkillMods.damageReductionMultiplier - turnFoodBuffMods.damageReductionBonus
+            0.35,
+            turnSkillMods.damageReductionMultiplier -
+              turnFoodBuffMods.damageReductionBonus -
+              (turnCompanionDef?.damageReductionBonus ?? 0)
           );
           if (effectiveDamageMult !== 1) {
             reduced = Math.max(1, Math.round(reduced * effectiveDamageMult));
@@ -1037,7 +1081,10 @@ export default function App() {
           rawNextHp = 1;
           cheatDeathTriggered = true;
         }
-        const totalRegenHp = turnSkillMods.regenHpPerTurn + turnFoodBuffMods.regenHpPerTurn;
+        const totalRegenHp =
+          turnSkillMods.regenHpPerTurn +
+          turnFoodBuffMods.regenHpPerTurn +
+          (turnCompanionDef?.regenHpPerTurn ?? 0);
         if (!isStart && rawNextHp > 0 && totalRegenHp > 0) {
           rawNextHp += totalRegenHp;
         }
@@ -1061,7 +1108,9 @@ export default function App() {
           rawCoinsDelta += equipBonuses.coinBonus;
         }
         const totalCoinBonusRatio =
-          turnSkillMods.coinGainBonusRatio + turnFoodBuffMods.coinGainBonusRatio;
+          turnSkillMods.coinGainBonusRatio +
+          turnFoodBuffMods.coinGainBonusRatio +
+          (turnCompanionDef?.coinGainBonusRatio ?? 0);
         if (!isStart && rawCoinsDelta > 0 && totalCoinBonusRatio > 0) {
           rawCoinsDelta += Math.max(1, Math.round(rawCoinsDelta * totalCoinBonusRatio));
         }
@@ -1278,10 +1327,12 @@ export default function App() {
           }
         }
 
-        // Skill Tree + Food Buff passive item discovery bonus (Foraging Branch + Herbal Tea)
+        // Skill Tree + Food Buff + Forest Companion passive item discovery bonus
         const bonusForagedItem = !isStart
           ? rollSkillBonusForageItem(
-              turnSkillMods.itemDiscoveryBonus + turnFoodBuffMods.itemDiscoveryBonus,
+              turnSkillMods.itemDiscoveryBonus +
+                turnFoodBuffMods.itemDiscoveryBonus +
+                (turnCompanionDef?.itemDiscoveryBonus ?? 0),
               Boolean(actuallyGained || rolledEvent?.event.tempItem),
               baseStats.learnedSkillIds.includes('foraging_5')
             )
@@ -1290,10 +1341,21 @@ export default function App() {
           nextInventory.push(bonusForagedItem);
         }
 
+        // Forest Companion periodic turn support (foraging ingredients / supplies)
+        const companionSupport = !isStart
+          ? rollCompanionTurnSupport(currentCompanionId, nextTurnNumber)
+          : { giftedItem: null, logEvent: null as CompanionLogEvent | null };
+        if (companionSupport.giftedItem) {
+          nextInventory.push(companionSupport.giftedItem);
+        }
+
         if (
           !isStart &&
           turnSkillMods.bonusCoinOnItemFind > 0 &&
-          (actuallyGained || rolledEvent?.event.tempItem || bonusForagedItem)
+          (actuallyGained ||
+            rolledEvent?.event.tempItem ||
+            bonusForagedItem ||
+            companionSupport.giftedItem)
         ) {
           nextCoins += turnSkillMods.bonusCoinOnItemFind;
           appliedCoinsChange = nextCoins - baseStats.coins;
@@ -1369,7 +1431,8 @@ export default function App() {
           unlockedAchievementsCount: newlyUnlocked.length,
         });
         const totalXpMult =
-          turnSkillMods.xpGainMultiplier * legacyBonuses.xpMultiplier;
+          turnSkillMods.xpGainMultiplier *
+          (legacyBonuses.xpMultiplier + (turnCompanionDef?.xpMultiplierBonus ?? 0));
         const gainedXp =
           rawGainedXp > 0
             ? Math.max(1, Math.round(rawGainedXp * totalXpMult))
@@ -1426,6 +1489,7 @@ export default function App() {
           regionName: bossPre.region.name,
           expiredBuffNames: tickedFoodBuffs.expiredNames,
           seasonalEvent: turnSeasonalEvent,
+          companionEvent: companionSupport.logEvent,
         };
 
         const nextUnlockedRun = isStart
@@ -1605,6 +1669,7 @@ export default function App() {
       activeSeasonalQuest,
       seasonalTriggeredInRun,
       blackMarketState.cycleIndex,
+      activeCompanionId,
       legacyBonuses.xpMultiplier,
       runTrufflePointsClaimed,
       firebaseUser,
@@ -1638,6 +1703,9 @@ export default function App() {
     setIsBlackMarketOpen(false);
     setBlackMarketState(createInitialBlackMarketState(1));
     setBlackMarketNotice(null);
+    setActiveCompanionId(null);
+    setSharedDishLastTurn(0);
+    setCompanionNotice(null);
     setRunTrufflePointsClaimed(false);
     setLastRunTruffleReward(0);
     setCraftNotice(null);
@@ -1725,6 +1793,9 @@ export default function App() {
     setIsBlackMarketOpen(false);
     setBlackMarketState(normalizeBlackMarketState(saved.blackMarketState, saved.turn));
     setBlackMarketNotice(null);
+    setActiveCompanionId(saved.activeCompanionId ?? null);
+    setSharedDishLastTurn(saved.sharedDishLastTurn ?? 0);
+    setCompanionNotice(null);
     setRunTrufflePointsClaimed(Boolean(saved.runTrufflePointsClaimed));
     setLastRunTruffleReward(saved.lastRunTruffleReward ?? 0);
     setCustomAction('');
@@ -1873,22 +1944,82 @@ export default function App() {
     const nextInventory = applyCooking(stats.inventory, dish);
     if (!nextInventory) return;
 
+    const companionNpc = activeCompanionId ? getNpcById(activeCompanionId) ?? null : null;
+    const synergy = resolveCompanionCookingSynergy(activeCompanionId);
+    const randomReview = generateRandomPiggyReview(dish.recipe, dish.itemA, dish.itemB, {
+      hpPercent: Math.round((stats.hp / stats.maxHp) * 100),
+      hungerPercent: Math.round((stats.hunger / stats.maxHunger) * 100),
+      companionName: companionNpc?.name ?? null,
+    });
+
     retroAudio.playEat();
-    setStats((prev) => ({
-      ...prev,
-      inventory: nextInventory,
-    }));
-    setActiveBuffs((prev) => activateOrRefreshFoodBuff(prev, dish.recipe));
-    setMetaProgression((prev) => ({
-      ...prev,
-      discoveredItems: Array.from(new Set([...prev.discoveredItems, dish.recipe.dishName])),
-      cookedRecipeCounts: {
-        ...(prev.cookedRecipeCounts ?? {}),
-        [dish.recipe.id]: ((prev.cookedRecipeCounts ?? {})[dish.recipe.id] ?? 0) + 1,
-      },
-    }));
+
+    setStats((prev) => {
+      const updatedInv = synergy.bonusItem ? [...nextInventory, synergy.bonusItem] : nextInventory;
+      const xpProg =
+        synergy.bonusXp > 0
+          ? advanceLevelAndXp(prev.level, prev.xp, prev.skillPoints, synergy.bonusXp)
+          : null;
+      return {
+        ...prev,
+        hp: synergy.bonusHp > 0 ? clamp(prev.hp + synergy.bonusHp, 0, prev.maxHp) : prev.hp,
+        coins: prev.coins + synergy.bonusCoins,
+        inventory: updatedInv,
+        level: xpProg ? xpProg.level : prev.level,
+        xp: xpProg ? xpProg.xp : prev.xp,
+        skillPoints: xpProg ? xpProg.skillPoints : prev.skillPoints,
+      };
+    });
+
+    setActiveBuffs((prev) =>
+      activateOrRefreshFoodBuff(prev, dish.recipe, synergy.bonusDurationTurns)
+    );
+
+    if (activeCompanionId) {
+      setNpcAffinities((prev) => ({
+        ...prev,
+        [activeCompanionId]: clamp((prev[activeCompanionId] ?? 30) + synergy.affinityDelta, 0, 100),
+      }));
+    } else {
+      // Without an active companion, Goblin Chef Potlid smells the camp cooking and warms up (+5 affinity)
+      setNpcAffinities((prev) => ({
+        ...prev,
+        goblin_chef: clamp((prev.goblin_chef ?? 35) + 5, 0, 100),
+      }));
+    }
+
+    setMetaProgression((prev) => {
+      const nextCookCount = ((prev.cookedRecipeCounts ?? {})[dish.recipe.id] ?? 0) + 1;
+      const discovered = new Set([...prev.discoveredItems, dish.recipe.dishName]);
+      if (synergy.bonusItem) {
+        discovered.add(synergy.bonusItem);
+      }
+      return {
+        ...prev,
+        discoveredItems: Array.from(discovered),
+        cookedRecipeCounts: {
+          ...(prev.cookedRecipeCounts ?? {}),
+          [dish.recipe.id]: nextCookCount,
+        },
+        cookingJournal: {
+          ...(prev.cookingJournal ?? {}),
+          [dish.recipe.id]: {
+            dishName: dish.recipe.dishName,
+            latestReview: randomReview,
+            ingredientsUsed: `${dish.itemA} ＋ ${dish.itemB}`,
+            cookedAt: new Date().toISOString(),
+            cookCount: nextCookCount,
+          },
+        },
+      };
+    });
+
+    const totalBuffTurns = dish.recipe.durationTurns + synergy.bonusDurationTurns;
+    const aromaBonusMsg = activeCompanionId
+      ? synergy.summaryText
+      : '鍋蓋大廚聞香點頭：哥布林大廚「鍋蓋」好感 +5（達 50 可邀為小跟班！）';
     setCookNotice(
-      `小鍋滾燙出爐「${dish.recipe.dishName}」！獲得 ${dish.recipe.durationTurns} 回合增益：${dish.recipe.effectLabel}。`
+      `小鍋滾燙出爐「${dish.recipe.dishName}」（${totalBuffTurns} 回合增益：${dish.recipe.effectLabel}）！\n小豬試吃：${randomReview}\n夥伴共鳴：${aromaBonusMsg}`
     );
 
     if (cookingFeedbackTimerRef.current !== null) {
@@ -1904,6 +2035,57 @@ export default function App() {
       setCookingFeedback(null);
       cookingFeedbackTimerRef.current = null;
     }, 1250);
+  };
+
+  const handleToggleCompanion = (npcId: NpcId) => {
+    if (phase !== 'PLAYING' || isLoading) return;
+    const score = npcAffinities[npcId] ?? 0;
+    const npc = getNpcById(npcId);
+    const compDef = getCompanionDefinition(npcId);
+    if (!npc || !compDef) return;
+    if (!isCompanionUnlocked(score)) {
+      setCompanionNotice(
+        `${npc.name}好感度須達 ${COMPANION_UNLOCK_AFFINITY} 才能同行（目前 ${score}）！可藉由烹煮或請吃料理快速升好感。`
+      );
+      return;
+    }
+
+    if (activeCompanionId === npcId) {
+      retroAudio.playClick();
+      setActiveCompanionId(null);
+      setCompanionNotice(`已讓「${npc.name}」暫時回泥巴村休息。`);
+    } else {
+      retroAudio.playAchievement();
+      setActiveCompanionId(npcId);
+      setCompanionNotice(
+        `${npc.name}（${compDef.companionTitle}）已加入隊伍！冒險加成：${compDef.adventurePerkLabel}。`
+      );
+    }
+  };
+
+  const handleShareDishWithNpc = (npcId: NpcId) => {
+    if (phase !== 'PLAYING' || isLoading) return;
+    if (activeBuffs.length === 0 || sharedDishLastTurn >= turn) return;
+    const npc = getNpcById(npcId);
+    if (!npc) return;
+
+    const dishName = activeBuffs[0].dishName;
+    const prevScore = npcAffinities[npcId] ?? npc.initialAffinity;
+    const nextScore = clamp(prevScore + 8, 0, 100);
+    retroAudio.playEat();
+    setNpcAffinities((prev) => ({
+      ...prev,
+      [npcId]: nextScore,
+    }));
+    setSharedDishLastTurn(turn);
+
+    const unlockedNow =
+      prevScore < COMPANION_UNLOCK_AFFINITY && nextScore >= COMPANION_UNLOCK_AFFINITY;
+    setCompanionNotice(
+      unlockedNow
+        ? `小豬熱心分了一碗「${dishName}」給${npc.name}（好感 +8 → ${nextScore}/100）！已解鎖「森林小跟班」邀請資格！`
+        : `小豬分了一碗「${dishName}」給${npc.name}，對方開心極了（好感 +8 → ${nextScore}/100）！`
+    );
   };
 
   const handleBuyBlackMarketOffer = (offer: BlackMarketOffer) => {
@@ -2134,6 +2316,14 @@ export default function App() {
   const seasonalRemainingTurns = activeSeasonalQuest
     ? Math.max(0, activeSeasonalQuest.expiresAtTurn - turn)
     : 0;
+  const activeCompanionDef = useMemo(
+    () => getCompanionDefinition(activeCompanionId),
+    [activeCompanionId]
+  );
+  const activeCompanionNpc = useMemo(
+    () => (activeCompanionId ? getNpcById(activeCompanionId) ?? null : null),
+    [activeCompanionId]
+  );
   const skillModifiers = useMemo(
     () => calculateSkillModifiers(stats.learnedSkillIds, stats.masteryRanks),
     [stats.learnedSkillIds, stats.masteryRanks]
@@ -2955,7 +3145,7 @@ export default function App() {
             </div>
           </div>
 
-          {/* NPC Affinity Panel */}
+          {/* NPC Affinity & Forest Companion Panel */}
           <div
             className={`pixel-panel p-3.5 sm:p-4 flex-col gap-3 ${
               mobileTab === 'social' ? 'flex' : 'hidden lg:flex'
@@ -2964,19 +3154,57 @@ export default function App() {
             <div className="flex items-center justify-between border-b-2 border-[#4a3525] pb-2.5">
               <div className="flex items-center gap-2">
                 <Heart className="w-4 h-4 text-[#ff8fab]" />
-                <h3 className="font-pixel text-sm text-[#f5ebd9]">NPC 好感度</h3>
+                <h3 className="font-pixel text-sm text-[#f5ebd9]">NPC 好感與小跟班</h3>
               </div>
-              <span className="text-[11px] text-[#b8a58d]">高好感享折扣與線索</span>
+              <span className="text-[11px] text-[#b8a58d]">好感 ≥{COMPANION_UNLOCK_AFFINITY} 可同行</span>
             </div>
+
+            {activeCompanionDef && activeCompanionNpc ? (
+              <div className="pixel-panel-inner border-[#7ce06b] bg-[#1c2818] p-2.5 space-y-1">
+                <div className="flex items-center justify-between gap-2 text-xs">
+                  <span className="font-pixel text-[#9fd67a] flex items-center gap-1.5 truncate">
+                    <Users className="w-3.5 h-3.5 shrink-0" />
+                    <span className="truncate">同行中：{activeCompanionNpc.name}</span>
+                  </span>
+                  <span className="text-[11px] text-[#ffd95a] shrink-0">
+                    {activeCompanionDef.companionTitle}
+                  </span>
+                </div>
+                <p className="text-[11px] text-[#e6d5b8] font-num">
+                  隨行：{activeCompanionDef.adventurePerkLabel}
+                </p>
+                <p className="text-[11px] text-[#ffd95a]">
+                  料理共鳴：{activeCompanionDef.cookingSynergyLabel}
+                </p>
+              </div>
+            ) : (
+              <div className="pixel-panel-inner border-[#4a3525] px-2.5 py-2 text-[11px] text-[#cbb89e] leading-relaxed">
+                目前獨行中。與 NPC 互動、委託或請吃營地料理將好感升至 {COMPANION_UNLOCK_AFFINITY}，即可邀為「森林小跟班」獲得伴隨支援！
+              </div>
+            )}
+
+            {companionNotice && (
+              <div className="pixel-panel-inner border-[#d99b26] bg-[#241b0f] px-2.5 py-2 text-xs text-[#ffd95a] leading-relaxed">
+                {companionNotice}
+              </div>
+            )}
 
             <div className="space-y-2">
               {MUD_KINGDOM_NPCS.map((npc) => {
                 const score = npcAffinities[npc.id] ?? npc.initialAffinity;
                 const tier = getAffinityTier(score);
+                const compDef = getCompanionDefinition(npc.id);
+                const unlockedCompanion = isCompanionUnlocked(score);
+                const isActiveCompanion = activeCompanionId === npc.id;
+                const canShareDishNow =
+                  phase === 'PLAYING' && activeBuffs.length > 0 && sharedDishLastTurn < turn;
+
                 return (
                   <div
                     key={npc.id}
-                    className="pixel-panel-inner p-2.5 space-y-1.5"
+                    className={`pixel-panel-inner p-2.5 space-y-1.5 ${
+                      isActiveCompanion ? 'border-[#7ce06b] bg-[#1b2417]' : ''
+                    }`}
                   >
                     <div className="flex items-center justify-between gap-2 text-xs">
                       <span className="font-medium text-[#f5ebd9] truncate">
@@ -2986,7 +3214,7 @@ export default function App() {
                         className="text-[11px] font-bold shrink-0"
                         style={{ color: tier.color }}
                       >
-                        {tier.label}
+                        {isActiveCompanion ? '同行跟班 ★' : tier.label}
                       </span>
                     </div>
 
@@ -3005,28 +3233,72 @@ export default function App() {
                       </span>
                     </div>
 
-                    <div className="flex items-center justify-between gap-2 text-[11px]">
+                    {compDef && (
+                      <p className="text-[10px] text-[#9fd67a] truncate font-num">
+                        跟班：{compDef.adventurePerkLabel}
+                      </p>
+                    )}
+
+                    <div className="flex flex-wrap items-center justify-between gap-1.5 text-[11px]">
                       <span className="text-[#9e8c77] truncate">
                         {npc.role} · {tier.perkLabel}
                       </span>
                       {phase === 'PLAYING' && (
-                        <button
-                          type="button"
-                          disabled={isLoading}
-                          onClick={() => {
-                            retroAudio.playClick();
-                            setCustomAction(
-                              score >= 70
-                                ? `向${npc.name}打聽冒險線索或進行交易`
-                                : `拜訪${npc.name}並友善聊天或交易`
-                            );
-                            setMobileTab('adventure');
-                            window.setTimeout(() => inputRef.current?.focus(), 40);
-                          }}
-                          className="pixel-btn bg-[#33251c] hover:bg-[#473326] text-[#ffd95a] px-2.5 py-1 min-h-[32px] text-[11px] shrink-0 cursor-pointer disabled:opacity-50"
-                        >
-                          {score >= 70 ? '打聽線索' : '互動'}
-                        </button>
+                        <div className="flex items-center gap-1 shrink-0">
+                          {canShareDishNow && (
+                            <button
+                              type="button"
+                              disabled={isLoading}
+                              onClick={() => handleShareDishWithNpc(npc.id)}
+                              title={`分享「${activeBuffs[0].dishName}」提升好感 +8`}
+                              className="pixel-btn bg-[#3a2a16] hover:bg-[#4e381d] border-[#d99b26] text-[#ffd95a] px-2 py-1 min-h-[30px] text-[11px] cursor-pointer disabled:opacity-50"
+                            >
+                              請吃料理+8
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            disabled={isLoading || !unlockedCompanion}
+                            onClick={() => handleToggleCompanion(npc.id)}
+                            title={
+                              unlockedCompanion
+                                ? isActiveCompanion
+                                  ? '點擊暫停同行'
+                                  : '邀請成為森林小跟班'
+                                : `好感達 ${COMPANION_UNLOCK_AFFINITY} 解鎖同行`
+                            }
+                            className={`pixel-btn px-2 py-1 min-h-[30px] text-[11px] cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed ${
+                              isActiveCompanion
+                                ? 'bg-[#2a4a24] hover:bg-[#345c2d] border-[#7ce06b] text-[#e7ffd9]'
+                                : unlockedCompanion
+                                ? 'bg-[#263222] hover:bg-[#32422d] border-[#5f8c4d] text-[#9fd67a]'
+                                : 'bg-[#251b15] text-[#8c7a65]'
+                            }`}
+                          >
+                            {isActiveCompanion
+                              ? '取消同行'
+                              : unlockedCompanion
+                              ? '邀為跟班'
+                              : `差${COMPANION_UNLOCK_AFFINITY - score}同行`}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={isLoading}
+                            onClick={() => {
+                              retroAudio.playClick();
+                              setCustomAction(
+                                score >= 70
+                                  ? `向${npc.name}打聽冒險線索或進行交易`
+                                  : `拜訪${npc.name}並友善聊天或交易`
+                              );
+                              setMobileTab('adventure');
+                              window.setTimeout(() => inputRef.current?.focus(), 40);
+                            }}
+                            className="pixel-btn bg-[#33251c] hover:bg-[#473326] text-[#ffd95a] px-2 py-1 min-h-[30px] text-[11px] cursor-pointer disabled:opacity-50"
+                          >
+                            {score >= 70 ? '線索' : '互動'}
+                          </button>
+                        </div>
                       )}
                     </div>
                   </div>
@@ -3483,6 +3755,20 @@ export default function App() {
                     </div>
                   )}
 
+                  {entry.companionEvent && (
+                    <div className="px-3 py-2 border bg-[#1c2618] border-[#5f8c4d] flex items-start gap-2.5 text-xs">
+                      <Users className="w-4 h-4 text-[#9fd67a] shrink-0 mt-0.5" />
+                      <div className="min-w-0 space-y-0.5">
+                        <p className="font-pixel text-[#9fd67a]">
+                          森林小跟班支援：{entry.companionEvent.npcName}（{entry.companionEvent.companionTitle}）
+                        </p>
+                        <p className="text-[#e6d5b8] leading-relaxed">
+                          {entry.companionEvent.message}
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
                   <TypewriterText
                     text={entry.story}
                     animate={isLatest && !streamedEntryIdsRef.current.has(entry.id)}
@@ -3788,6 +4074,18 @@ export default function App() {
                       帶入節慶線索
                     </button>
                   )}
+                </div>
+              )}
+
+              {activeCompanionDef && activeCompanionNpc && (
+                <div className="pixel-panel-inner border-[#5f8c4d] bg-[#1a2417] px-3 py-1.5 flex items-center justify-between gap-2 text-[11px]">
+                  <span className="flex items-center gap-1.5 text-[#9fd67a] font-medium truncate">
+                    <Users className="w-3.5 h-3.5 shrink-0" />
+                    <span className="truncate">同行跟班：{activeCompanionNpc.name}</span>
+                  </span>
+                  <span className="text-[#ffd95a] font-num shrink-0 truncate max-w-[52%]">
+                    {activeCompanionDef.adventurePerkLabel}
+                  </span>
                 </div>
               )}
 
@@ -4302,13 +4600,26 @@ export default function App() {
             {cookNotice && (
               <div
                 key={cookingFeedback ? `notice-${cookingFeedback.key}` : 'notice-static'}
-                className={`pixel-panel-inner border-[#d99b26] bg-[#261d12] px-3 py-2 text-xs text-[#ffd95a] leading-relaxed ${
+                className={`pixel-panel-inner border-[#d99b26] bg-[#261d12] px-3 py-2 text-xs text-[#ffd95a] leading-relaxed whitespace-pre-line ${
                   cookingFeedback ? 'cook-notice-pop' : ''
                 }`}
               >
                 {cookNotice}
               </div>
             )}
+
+            <div className="pixel-panel-inner border-[#4a3525] bg-[#17120d] px-2.5 py-2 text-[11px] leading-relaxed">
+              {activeCompanionDef && activeCompanionNpc ? (
+                <span className="text-[#9fd67a]">
+                  <strong className="text-[#ffd95a]">{activeCompanionNpc.name}</strong> 正在鍋旁試吃：
+                  {activeCompanionDef.cookingSynergyLabel}
+                </span>
+              ) : (
+                <span className="text-[#cbb89e]">
+                  料理×好感連動：開火煮菜會提升大廚好感，或到「NPC 好感」分頁邀請 ≥{COMPANION_UNLOCK_AFFINITY} 好感的小跟班一起下廚享額外共振！
+                </span>
+              )}
+            </div>
 
             {activeBuffs.length > 0 && (
               <div className="space-y-1.5">

@@ -252,17 +252,82 @@ export function applyCooking(inventory: string[], dish: AvailableCookingDish): s
   return inventory.filter((_, idx) => idx !== indexA && idx !== indexB);
 }
 
+const PIGGY_REVIEW_OPENERS: Record<FoodBuffId, string[]> = {
+  truffle_bisque: [
+    '「呼嚕呼嚕！一入口就像整座松露森林在嘴裡開派對，連鍋底都被我用豬鼻子舔得比白銀湯匙還亮！」',
+    '「喔喔喔！這金黃濃稠的松露湯頭太罪惡了，喝完覺得自己頭上都閃著豬豬金幣的光芒！」',
+    '「天啊，這簡直是泥巴王國皇室等級的濃湯！每喝一口都在替我的錢包跟胃袋祈福呢！」',
+    '「咕嘟咕嘟三口見底！這香味濃郁到大野狼路過都忘記搶劫，只想問我能不能分半碗！」',
+  ],
+  spicy_roast: [
+    '「嘶哈——好辣好香！吃完覺得自己能直接一頭撞飛大野狼，下次記得再多配半口森林泉水！」',
+    '「滋滋作響的焦香烤肉超對味！嘴唇辣得像噴火小豬，但渾身肌肉瞬間硬邦邦的！」',
+    '「喀滋喀滋咬下去超多汁！辣度剛剛好把寒冷跟疲勞全燒光，現在就算遇上 Boss 我也不怕！」',
+    '「哇嗚——辣到豬耳朵直冒煙！但這股野性香味實在太上頭，明天還要再烤一串！」',
+  ],
+  herbal_tea: [
+    '「清甜又回甘～喝完整隻豬都輕飄飄的，連埋在泥土三尺深的松露味道都逃不過我的鼻子！」',
+    '「呼——花果茶香把一身泥巴味都洗淨了！鼻尖突然靈敏十倍，草叢裡有什麼寶物全都聞得到！」',
+    '「咕嚕咕嚕喝下這壺神仙特調，傷口感覺暖暖癒合中，連路邊松鼠都跑來跟我要配方！」',
+    '「酸酸甜甜的草本香氣在舌尖跳舞～感覺下一回合一定會踩到閃亮亮的驚喜好物！」',
+  ],
+  warm_soup: [
+    '「雖然看起來像大雜燴，但半夜在黑漆漆的森林裡喝上一口，肚皮暖呼呼的就不怕半夜餓醒啦！」',
+    '「熱騰騰的雜糧濃湯太治癒了！喝完就像蓋了一層厚厚的泥巴棉被，再遠的路都走得動！」',
+    '「一口氣喝光兩大碗！滿滿的膳食纖維把胃袋塞得踏踏實實，完全不浪費任何一點旅途食材！」',
+    '「別看名字樸實，這鍋湯可是救命神隊友！暖胃又耐餓，貪吃小豬給出滿分好評！」',
+  ],
+};
+
+export function generateRandomPiggyReview(
+  recipe: CookingRecipeDefinition,
+  itemA: string,
+  itemB: string,
+  context?: {
+    hpPercent?: number;
+    hungerPercent?: number;
+    companionName?: string | null;
+    rng?: () => number;
+  }
+): string {
+  const rng = context?.rng ?? Math.random;
+  const pool = PIGGY_REVIEW_OPENERS[recipe.id] ?? [recipe.piggyReview];
+  const baseLine = pool[Math.floor(rng() * pool.length)];
+
+  const tailComments: string[] = [
+    `（本次以「${itemA}」配「${itemB}」下鍋慢煮，風味絕佳！）`,
+    `（沒想到「${itemA}」跟「${itemB}」在鍋裡這麼合拍！）`,
+  ];
+
+  if (typeof context?.hungerPercent === 'number' && context.hungerPercent <= 30) {
+    tailComments.push(`（餓扁的時候吃到「${itemA}＋${itemB}」煮的菜，幸福感直接爆表！）`);
+  }
+  if (typeof context?.hpPercent === 'number' && context.hpPercent <= 45) {
+    tailComments.push(`（負傷途中喝到這鍋「${itemA}」特調，瞬間又充滿活下去的勇氣！）`);
+  }
+  if (context?.companionName) {
+    tailComments.push(
+      `（跟班「${context.companionName}」也在旁連聲稱讚「${itemA}＋${itemB}」這組神搭配！）`
+    );
+  }
+
+  const tail = tailComments[Math.floor(rng() * tailComments.length)];
+  return `${baseLine} ${tail}`;
+}
+
 export function activateOrRefreshFoodBuff(
   currentBuffs: ActiveFoodBuff[],
-  recipe: CookingRecipeDefinition
+  recipe: CookingRecipeDefinition,
+  bonusDurationTurns = 0
 ): ActiveFoodBuff[] {
   const existing = currentBuffs.find((b) => b.id === recipe.id);
-  const cappedMax = recipe.durationTurns + 2;
+  const totalNewDuration = recipe.durationTurns + Math.max(0, bonusDurationTurns);
+  const cappedMax = totalNewDuration + 2;
 
   if (existing) {
     const extendedTurns = Math.min(
       cappedMax,
-      existing.remainingTurns + Math.max(2, Math.ceil(recipe.durationTurns / 2))
+      existing.remainingTurns + Math.max(2, Math.ceil(totalNewDuration / 2)) + Math.max(0, bonusDurationTurns)
     );
     return currentBuffs.map((b) =>
       b.id === recipe.id
@@ -279,8 +344,8 @@ export function activateOrRefreshFoodBuff(
     id: recipe.id,
     dishName: recipe.dishName,
     effectLabel: recipe.effectLabel,
-    remainingTurns: recipe.durationTurns,
-    maxTurns: recipe.durationTurns,
+    remainingTurns: totalNewDuration,
+    maxTurns: totalNewDuration,
     ignoreNightExtraDrain: recipe.ignoreNightExtraDrain,
     hungerSaveFlat: recipe.hungerSaveFlat,
     attackBonus: recipe.attackBonus,

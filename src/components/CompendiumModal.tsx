@@ -426,10 +426,13 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
               {/* Cookbook Recipe Cards */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 {COOKING_RECIPES.map((recipe) => {
+                  const journalEntry = meta.cookingJournal?.[recipe.id];
                   const cookCount =
+                    journalEntry?.cookCount ??
                     cookedCounts[recipe.id] ??
                     (meta.discoveredItems.includes(recipe.dishName) ? 1 : 0);
                   const isUnlocked = cookCount > 0;
+                  const displayReview = journalEntry?.latestReview || recipe.piggyReview;
 
                   return (
                     <div
@@ -479,13 +482,19 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
                             </span>
                           </div>
                           <div className="flex items-start justify-between gap-2">
-                            <span className="text-[#b8a58d] shrink-0">食材線索</span>
-                            <span className="text-[#e6d5b8] text-right">{recipe.ingredientHint}</span>
+                            <span className="text-[#b8a58d] shrink-0">
+                              {isUnlocked && journalEntry?.ingredientsUsed ? '上次食材' : '食材線索'}
+                            </span>
+                            <span className="text-[#e6d5b8] text-right">
+                              {isUnlocked && journalEntry?.ingredientsUsed
+                                ? journalEntry.ingredientsUsed
+                                : recipe.ingredientHint}
+                            </span>
                           </div>
                         </div>
                       </div>
 
-                      {/* Piggy's Food Review */}
+                      {/* Piggy's Unique Food Review from cookingJournal */}
                       <div
                         className={`border px-2.5 py-2 flex items-start gap-2.5 ${
                           isUnlocked
@@ -501,7 +510,7 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
                         </div>
                         <div className="min-w-0 flex-1 space-y-0.5">
                           <div className="text-[11px] font-pixel text-[#f3b562]">
-                            小豬試吃評價
+                            小豬專屬食評手記
                           </div>
                           <p
                             className={`text-xs leading-relaxed ${
@@ -509,7 +518,7 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
                             }`}
                           >
                             {isUnlocked
-                              ? recipe.piggyReview
+                              ? displayReview
                               : '「咕嚕嚕……肚子好餓，快丟兩樣食材進鍋子讓我嚐嚐看嘛！」'}
                           </p>
                         </div>
