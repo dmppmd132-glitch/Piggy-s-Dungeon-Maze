@@ -196,6 +196,13 @@ export interface TurnRequestBody {
     remainingTurns: number;
     effectLabel: string;
   }> | null;
+  seasonalFestival?: {
+    mode: 'TRIGGERED' | 'SEARCH_SUCCESS' | 'ONGOING' | 'COMPLETED' | 'EXPIRED';
+    title: string;
+    seasonLabel: string;
+    targetItem: string;
+    remainingTurns?: number;
+  } | null;
 }
 
 export interface EpitaphRequestBody {
@@ -397,6 +404,22 @@ function buildTurnPrompt(body: TurnRequestBody): {
           .join('｜')}`
       : '';
 
+  let seasonalPrompt = '';
+  if (!isStart && body.seasonalFestival) {
+    const sf = body.seasonalFestival;
+    if (sf.mode === 'TRIGGERED') {
+      seasonalPrompt = `\n【限時節慶任務啟動：${sf.seasonLabel}「${sf.title}」】目標尋找「${sf.targetItem}」（限時 ${sf.remainingTurns ?? 5} 回合內完成）。請描寫村莊熱鬧的節慶氣氛，並在選項中給出一個尋找線索。\n`;
+    } else if (sf.mode === 'SEARCH_SUCCESS') {
+      seasonalPrompt = `\n【節慶尋獲目標】小豬找到了「${sf.targetItem}」，系統已放入背包，請描寫發現過程。\n`;
+    } else if (sf.mode === 'COMPLETED') {
+      seasonalPrompt = `\n【節慶任務達成：${sf.title}】小豬獻上「${sf.targetItem}」完成慶典！（系統已發放報酬，請勿重複計入 coins_change 或 new_item）\n`;
+    } else if (sf.mode === 'EXPIRED') {
+      seasonalPrompt = `\n【節慶結束】限時節慶「${sf.title}」本回合剛好落幕，小豬看見慶典燈火收攤。\n`;
+    } else if (sf.mode === 'ONGOING') {
+      seasonalPrompt = `\n【進行中節慶】${sf.title}（尋找「${sf.targetItem}」，剩 ${sf.remainingTurns ?? 1} 回合結束）。\n`;
+    }
+  }
+
   const rc = body.regionContext;
   let regionPrompt = '';
   if (rc) {
@@ -425,7 +448,7 @@ ${historySummary}
 狀態：HP ${stats.hp}/100｜飽食 ${stats.hunger}/100${stats.hunger <= 0 ? '（飢餓扣血中！）' : ''}｜豬豬幣 ${stats.coins}｜背包：${stats.inventory.join('、') || '空'}
 ${equipmentText}
 ${skillText}
-${npcAffinitiesText}${foodBuffsText}${worldCyclePrompt}${regionPrompt}${randomEventPrompt}${questPrompt}
+${npcAffinitiesText}${foodBuffsText}${worldCyclePrompt}${regionPrompt}${randomEventPrompt}${questPrompt}${seasonalPrompt}
 玩家行動：「${action}」
 推進劇情、結算合理數值與道具變化，並給出 3 個新選項與英文像素場景提示詞。`;
 

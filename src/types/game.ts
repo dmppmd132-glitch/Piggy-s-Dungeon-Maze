@@ -246,6 +246,55 @@ export interface ActiveFoodBuff {
   itemDiscoveryBonus?: number;
 }
 
+export type CalendarSeasonId = 'spring' | 'summer' | 'autumn' | 'winter';
+
+export interface ActiveSeasonalQuest {
+  id: string;
+  seasonId: CalendarSeasonId;
+  seasonLabel: string;
+  title: string;
+  description: string;
+  targetItem: string;
+  targetKeywords: string[];
+  clueHint: string;
+  startTurn: number;
+  expiresAtTurn: number;
+  rewardCoins: number;
+  rewardItem: string;
+  rewardTrufflePoints: number;
+}
+
+export interface SeasonalQuestLogEvent {
+  type: 'triggered' | 'completed' | 'expired';
+  title: string;
+  seasonLabel: string;
+  targetItem?: string;
+  rewardCoins?: number;
+  rewardItem?: string;
+  rewardTrufflePoints?: number;
+  expiresAtTurn?: number;
+}
+
+export type BlackMarketItemCategory = 'ingredient' | 'tonic' | 'gear' | 'mystery';
+
+export interface BlackMarketOffer {
+  id: string;
+  name: string;
+  category: BlackMarketItemCategory;
+  description: string;
+  effectSummary: string;
+  basePrice: number;
+  stock: number;
+  purchasedCount: number;
+}
+
+export interface BlackMarketState {
+  cycleIndex: number;
+  rerollCount: number;
+  offers: BlackMarketOffer[];
+  affinityBoostedInCycle: boolean;
+}
+
 export interface LogEntry {
   id: string;
   turn: number;
@@ -266,6 +315,7 @@ export interface LogEntry {
   bossEvent?: BossLogEvent | null;
   regionName?: string;
   expiredBuffNames?: string[];
+  seasonalEvent?: SeasonalQuestLogEvent | null;
 }
 
 export interface GameOverSummary {

@@ -4,6 +4,7 @@ import {
   Award,
   Backpack,
   BookOpen,
+  Calendar,
   Check,
   CloudRain,
   Compass,
@@ -23,6 +24,7 @@ import {
   Skull,
   Soup,
   Sparkles,
+  Store,
   Sun,
   Sunrise,
   Sunset,
@@ -107,6 +109,26 @@ import {
 } from './utils/equipment';
 import { SkillTreeModal } from './components/SkillTreeModal';
 import { CompendiumModal, type CompendiumTab } from './components/CompendiumModal';
+import { BlackMarketModal } from './components/BlackMarketModal';
+import {
+  createActiveSeasonalQuest,
+  findSeasonalTargetIndex,
+  isSeasonalDeliveryAction,
+  isSeasonalSearchAction,
+  matchesSeasonalTargetItem,
+  normalizeActiveSeasonalQuest,
+} from './utils/seasonalEvents';
+import {
+  BLACK_MARKET_REROLL_COST,
+  calculateBlackMarketPrice,
+  createInitialBlackMarketState,
+  estimateItemSellPrice,
+  findDuplicateSellableClutter,
+  generateBlackMarketOffers,
+  getBlackMarketCycleIndex,
+  normalizeBlackMarketState,
+  rollMysteryBoxOutcome,
+} from './utils/blackMarket';
 import {
   advanceLevelAndXp,
   calculateSkillModifiers,
@@ -154,7 +176,10 @@ import type {
   ActiveBossState,
   ActiveFoodBuff,
   ActiveQuest,
+  ActiveSeasonalQuest,
   AppliedDeltas,
+  BlackMarketOffer,
+  BlackMarketState,
   DmTurnResponse,
   EquipSlot,
   GameOverSummary,
@@ -168,6 +193,7 @@ import type {
   NpcId,
   PlayerStats,
   QuestLogEvent,
+  SeasonalQuestLogEvent,
   SkillId,
   TalentId,
   UnlockedAchievement,
@@ -231,6 +257,9 @@ interface SavedAdventureState {
   activeBoss?: ActiveBossState | null;
   defeatedBossIds?: string[];
   activeBuffs?: ActiveFoodBuff[];
+  activeSeasonalQuest?: ActiveSeasonalQuest | null;
+  seasonalTriggeredInRun?: boolean;
+  blackMarketState?: BlackMarketState;
   runTrufflePointsClaimed?: boolean;
   lastRunTruffleReward?: number;
   savedAt: string;
@@ -300,6 +329,9 @@ function loadSavedAdventure(): SavedAdventureState | null {
       activeBoss: parsed.activeBoss ?? null,
       defeatedBossIds: Array.isArray(parsed.defeatedBossIds) ? parsed.defeatedBossIds : [],
       activeBuffs: normalizeActiveFoodBuffs(parsed.activeBuffs),
+      activeSeasonalQuest: normalizeActiveSeasonalQuest(parsed.activeSeasonalQuest),
+      seasonalTriggeredInRun: Boolean(parsed.seasonalTriggeredInRun),
+      blackMarketState: normalizeBlackMarketState(parsed.blackMarketState, parsed.turn),
       runTrufflePointsClaimed: Boolean(parsed.runTrufflePointsClaimed),
       lastRunTruffleReward:
         typeof parsed.lastRunTruffleReward === 'number' ? parsed.lastRunTruffleReward : 0,
@@ -365,6 +397,13 @@ export default function App() {
   const [activeBoss, setActiveBoss] = useState<ActiveBossState | null>(null);
   const [defeatedBossIds, setDefeatedBossIds] = useState<string[]>([]);
   const [activeBuffs, setActiveBuffs] = useState<ActiveFoodBuff[]>([]);
+  const [activeSeasonalQuest, setActiveSeasonalQuest] = useState<ActiveSeasonalQuest | null>(null);
+  const [seasonalTriggeredInRun, setSeasonalTriggeredInRun] = useState<boolean>(false);
+  const [isBlackMarketOpen, setIsBlackMarketOpen] = useState<boolean>(false);
+  const [blackMarketState, setBlackMarketState] = useState<BlackMarketState>(() =>
+    createInitialBlackMarketState(1)
+  );
+  const [blackMarketNotice, setBlackMarketNotice] = useState<string | null>(null);
   const [runTrufflePointsClaimed, setRunTrufflePointsClaimed] = useState<boolean>(false);
   const [lastRunTruffleReward, setLastRunTruffleReward] = useState<number>(0);
   const [metaProgression, setMetaProgression] = useState<MetaProgressionState>(() =>
@@ -426,6 +465,9 @@ export default function App() {
         activeBoss,
         defeatedBossIds,
         activeBuffs,
+        activeSeasonalQuest,
+        seasonalTriggeredInRun,
+        blackMarketState,
         runTrufflePointsClaimed,
         lastRunTruffleReward,
         savedAt: new Date().toISOString(),
@@ -453,6 +495,9 @@ export default function App() {
     activeBoss,
     defeatedBossIds,
     activeBuffs,
+    activeSeasonalQuest,
+    seasonalTriggeredInRun,
+    blackMarketState,
     runTrufflePointsClaimed,
     lastRunTruffleReward,
   ]);
@@ -638,6 +683,64 @@ export default function App() {
             }
           : null;
 
+      // Seasonal Event Handler (Pre-DM): trigger festival by current system month and auto-expire after set turns
+      const currentSeasonal = isStart ? null : activeSeasonalQuest;
+      let seasonalPre: {
+        mode: 'TRIGGERED' | 'SEARCH_SUCCESS' | 'ONGOING' | 'COMPLETED' | 'EXPIRED';
+        quest: ActiveSeasonalQuest;
+        remainingTurns: number;
+      } | null = null;
+
+      if (!isStart) {
+        if (currentSeasonal) {
+          if (nextTurnNumber > currentSeasonal.expiresAtTurn) {
+            seasonalPre = {
+              mode: 'EXPIRED',
+              quest: currentSeasonal,
+              remainingTurns: 0,
+            };
+          } else {
+            const seasonalTargetIdx = findSeasonalTargetIndex(
+              baseStats.inventory,
+              currentSeasonal
+            );
+            const remainingTurns = Math.max(0, currentSeasonal.expiresAtTurn - nextTurnNumber);
+            if (
+              seasonalTargetIdx !== -1 &&
+              isSeasonalDeliveryAction(cleanAction, currentSeasonal)
+            ) {
+              seasonalPre = {
+                mode: 'COMPLETED',
+                quest: currentSeasonal,
+                remainingTurns,
+              };
+            } else if (
+              seasonalTargetIdx === -1 &&
+              isSeasonalSearchAction(cleanAction, currentSeasonal)
+            ) {
+              seasonalPre = {
+                mode: 'SEARCH_SUCCESS',
+                quest: currentSeasonal,
+                remainingTurns,
+              };
+            } else {
+              seasonalPre = {
+                mode: 'ONGOING',
+                quest: currentSeasonal,
+                remainingTurns,
+              };
+            }
+          }
+        } else if (!seasonalTriggeredInRun && nextTurnNumber >= 3) {
+          const newFestival = createActiveSeasonalQuest(nextTurnNumber, new Date());
+          seasonalPre = {
+            mode: 'TRIGGERED',
+            quest: newFestival,
+            remainingTurns: Math.max(1, newFestival.expiresAtTurn - nextTurnNumber),
+          };
+        }
+      }
+
       const rawEquipBonuses = calculateEquipmentBonuses(baseStats.equipment);
       const equipBonuses =
         turnSkillMods.equipmentEffectivenessMultiplier !== 1
@@ -746,6 +849,15 @@ export default function App() {
               remainingTurns: b.remainingTurns,
               effectLabel: b.effectLabel,
             })),
+            seasonalFestival: seasonalPre
+              ? {
+                  mode: seasonalPre.mode,
+                  title: seasonalPre.quest.title,
+                  seasonLabel: seasonalPre.quest.seasonLabel,
+                  targetItem: seasonalPre.quest.targetItem,
+                  remainingTurns: seasonalPre.remainingTurns,
+                }
+              : null,
           }),
         });
 
@@ -1059,6 +1171,71 @@ export default function App() {
           }
         }
 
+        // Resolve Seasonal Festival Quest progression & auto-expiration
+        let nextSeasonalQuest: ActiveSeasonalQuest | null = isStart ? null : currentSeasonal;
+        let nextSeasonalTriggered = isStart ? false : seasonalTriggeredInRun;
+        let turnSeasonalEvent: SeasonalQuestLogEvent | null = null;
+        let seasonalTrufflePointsBonus = 0;
+
+        if (!isStart && seasonalPre) {
+          if (seasonalPre.mode === 'COMPLETED') {
+            const removeSeasonalIdx = findSeasonalTargetIndex(nextInventory, seasonalPre.quest);
+            if (removeSeasonalIdx !== -1) {
+              nextInventory.splice(removeSeasonalIdx, 1);
+            }
+            let festCoins = seasonalPre.quest.rewardCoins;
+            if (baseStats.modifiers.coinGainMultiplier > 1) {
+              festCoins = Math.round(festCoins * baseStats.modifiers.coinGainMultiplier);
+            }
+            nextCoins += festCoins;
+            appliedCoinsChange = nextCoins - baseStats.coins;
+            if (seasonalPre.quest.rewardItem) {
+              nextInventory.push(seasonalPre.quest.rewardItem);
+            }
+            seasonalTrufflePointsBonus = seasonalPre.quest.rewardTrufflePoints;
+            nextSeasonalQuest = null;
+            turnSeasonalEvent = {
+              type: 'completed',
+              title: seasonalPre.quest.title,
+              seasonLabel: seasonalPre.quest.seasonLabel,
+              targetItem: seasonalPre.quest.targetItem,
+              rewardCoins: festCoins,
+              rewardItem: seasonalPre.quest.rewardItem,
+              rewardTrufflePoints: seasonalTrufflePointsBonus,
+            };
+          } else if (seasonalPre.mode === 'EXPIRED') {
+            nextSeasonalQuest = null;
+            turnSeasonalEvent = {
+              type: 'expired',
+              title: seasonalPre.quest.title,
+              seasonLabel: seasonalPre.quest.seasonLabel,
+              targetItem: seasonalPre.quest.targetItem,
+              expiresAtTurn: seasonalPre.quest.expiresAtTurn,
+            };
+          } else if (seasonalPre.mode === 'TRIGGERED') {
+            nextSeasonalQuest = seasonalPre.quest;
+            nextSeasonalTriggered = true;
+            turnSeasonalEvent = {
+              type: 'triggered',
+              title: seasonalPre.quest.title,
+              seasonLabel: seasonalPre.quest.seasonLabel,
+              targetItem: seasonalPre.quest.targetItem,
+              rewardCoins: seasonalPre.quest.rewardCoins,
+              rewardItem: seasonalPre.quest.rewardItem,
+              rewardTrufflePoints: seasonalPre.quest.rewardTrufflePoints,
+              expiresAtTurn: seasonalPre.quest.expiresAtTurn,
+            };
+          } else if (
+            seasonalPre.mode === 'SEARCH_SUCCESS' &&
+            !nextInventory.some((it) => matchesSeasonalTargetItem(it, seasonalPre.quest))
+          ) {
+            nextInventory.push(seasonalPre.quest.targetItem);
+            if (!actuallyGained) {
+              actuallyGained = seasonalPre.quest.targetItem;
+            }
+          }
+        }
+
         // Resolve NPC Affinity Delta & Proactive Clue
         let nextNpcAffinities: NpcAffinityMap = { ...baseAffinities };
         let turnAffinityEvent: NpcAffinityEvent | null = null;
@@ -1185,7 +1362,10 @@ export default function App() {
           isStart,
           foundItem: Boolean(actuallyGained || bonusForagedItem || rolledEvent?.event.tempItem),
           gainedCoins: appliedCoinsChange > 0,
-          completedQuest: turnQuestEvent?.type === 'completed' || bossPost.bossEvent?.type === 'defeated',
+          completedQuest:
+            turnQuestEvent?.type === 'completed' ||
+            turnSeasonalEvent?.type === 'completed' ||
+            bossPost.bossEvent?.type === 'defeated',
           unlockedAchievementsCount: newlyUnlocked.length,
         });
         const totalXpMult =
@@ -1245,6 +1425,7 @@ export default function App() {
           bossEvent: bossPost.bossEvent,
           regionName: bossPre.region.name,
           expiredBuffNames: tickedFoodBuffs.expiredNames,
+          seasonalEvent: turnSeasonalEvent,
         };
 
         const nextUnlockedRun = isStart
@@ -1267,6 +1448,19 @@ export default function App() {
         setActiveBoss(bossPost.nextBoss);
         setDefeatedBossIds(bossPost.nextDefeatedBossIds);
         setActiveBuffs(tickedFoodBuffs.nextBuffs);
+        setActiveSeasonalQuest(nextSeasonalQuest);
+        setSeasonalTriggeredInRun(nextSeasonalTriggered);
+
+        if (isStart) {
+          setBlackMarketState(createInitialBlackMarketState(1));
+          setBlackMarketNotice(null);
+        } else {
+          const nextMarketCycle = getBlackMarketCycleIndex(nextTurnNumber);
+          if (nextMarketCycle !== blackMarketState.cycleIndex) {
+            setBlackMarketState(createInitialBlackMarketState(nextTurnNumber));
+            setBlackMarketNotice('泥巴獾的流動推車剛補進全新一批黑市貨物！');
+          }
+        }
         if (newlyUnlocked.length > 0) {
           const mergedIds = Array.from(
             new Set([...allUnlockedIds, ...newlyUnlocked.map((a) => a.id)])
@@ -1319,7 +1513,10 @@ export default function App() {
         setMetaProgression((prev) => ({
           ...prev,
           trufflePoints:
-            prev.trufflePoints + bossPost.trufflePointsEarned + runEndBonusPoints,
+            prev.trufflePoints +
+            bossPost.trufflePointsEarned +
+            seasonalTrufflePointsBonus +
+            runEndBonusPoints,
           bestTurn: Math.max(prev.bestTurn, nextTurnNumber),
           bestScore: Math.max(prev.bestScore, nextScore),
           discoveredItems: Array.from(new Set([...prev.discoveredItems, ...newlyDiscovered])),
@@ -1364,6 +1561,7 @@ export default function App() {
           if (
             newlyUnlocked.length > 0 ||
             turnQuestEvent?.type === 'completed' ||
+            turnSeasonalEvent?.type === 'completed' ||
             bossPost.bossEvent?.type === 'defeated' ||
             turnLevelUp
           ) {
@@ -1404,6 +1602,9 @@ export default function App() {
       activeBoss,
       defeatedBossIds,
       activeBuffs,
+      activeSeasonalQuest,
+      seasonalTriggeredInRun,
+      blackMarketState.cycleIndex,
       legacyBonuses.xpMultiplier,
       runTrufflePointsClaimed,
       firebaseUser,
@@ -1432,6 +1633,11 @@ export default function App() {
     setActiveBoss(null);
     setDefeatedBossIds([]);
     setActiveBuffs([]);
+    setActiveSeasonalQuest(null);
+    setSeasonalTriggeredInRun(false);
+    setIsBlackMarketOpen(false);
+    setBlackMarketState(createInitialBlackMarketState(1));
+    setBlackMarketNotice(null);
     setRunTrufflePointsClaimed(false);
     setLastRunTruffleReward(0);
     setCraftNotice(null);
@@ -1514,6 +1720,11 @@ export default function App() {
     setActiveBoss(saved.activeBoss ?? null);
     setDefeatedBossIds(saved.defeatedBossIds ?? []);
     setActiveBuffs(normalizeActiveFoodBuffs(saved.activeBuffs));
+    setActiveSeasonalQuest(normalizeActiveSeasonalQuest(saved.activeSeasonalQuest));
+    setSeasonalTriggeredInRun(Boolean(saved.seasonalTriggeredInRun));
+    setIsBlackMarketOpen(false);
+    setBlackMarketState(normalizeBlackMarketState(saved.blackMarketState, saved.turn));
+    setBlackMarketNotice(null);
     setRunTrufflePointsClaimed(Boolean(saved.runTrufflePointsClaimed));
     setLastRunTruffleReward(saved.lastRunTruffleReward ?? 0);
     setCustomAction('');
@@ -1695,6 +1906,174 @@ export default function App() {
     }, 1250);
   };
 
+  const handleBuyBlackMarketOffer = (offer: BlackMarketOffer) => {
+    if (phase !== 'PLAYING' || isLoading) return;
+    if (offer.purchasedCount >= offer.stock) return;
+    const badgerAffinity = npcAffinities.badger_merchant ?? 10;
+    const finalPrice = calculateBlackMarketPrice(offer.basePrice, badgerAffinity);
+    if (stats.coins < finalPrice) {
+      setBlackMarketNotice(`豬豬幣不足，需要 ${finalPrice} 枚豬豬幣！`);
+      return;
+    }
+
+    let noticeText = '';
+    const gainedItemsForCompendium: string[] = [];
+
+    if (offer.category === 'tonic') {
+      retroAudio.playEat();
+      setStats((prev) => ({
+        ...prev,
+        coins: Math.max(0, prev.coins - finalPrice),
+        hp: clamp(prev.hp + 28, 0, prev.maxHp),
+        hunger: clamp(prev.hunger + 28, 0, prev.maxHunger),
+      }));
+      noticeText = `趁熱喝下「${offer.name}」（-${finalPrice} 幣）：HP +28、飽食度 +28！`;
+    } else if (offer.category === 'mystery') {
+      const outcome = rollMysteryBoxOutcome();
+      if (outcome.hpDelta < 0) {
+        retroAudio.playHurt();
+      } else {
+        retroAudio.playAchievement();
+      }
+      gainedItemsForCompendium.push(...outcome.gainedItems);
+      setStats((prev) => ({
+        ...prev,
+        coins: Math.max(0, prev.coins - finalPrice + outcome.coinsDelta),
+        hp:
+          outcome.hpDelta < 0
+            ? Math.max(1, prev.hp + outcome.hpDelta)
+            : clamp(prev.hp + outcome.hpDelta, 0, prev.maxHp),
+        inventory: [...prev.inventory, ...outcome.gainedItems],
+      }));
+      noticeText = `開箱【${outcome.title}】${outcome.description}${
+        outcome.coinsDelta > 0 ? `（額外 +${outcome.coinsDelta} 幣）` : ''
+      }`;
+    } else {
+      retroAudio.playCoin();
+      gainedItemsForCompendium.push(offer.name);
+      setStats((prev) => ({
+        ...prev,
+        coins: Math.max(0, prev.coins - finalPrice),
+        inventory: [...prev.inventory, offer.name],
+      }));
+      noticeText = `以 ${finalPrice} 枚豬豬幣購得「${offer.name}」，已放入背包！`;
+    }
+
+    if (gainedItemsForCompendium.length > 0) {
+      setMetaProgression((prev) => ({
+        ...prev,
+        discoveredItems: Array.from(
+          new Set([...prev.discoveredItems, ...gainedItemsForCompendium])
+        ),
+      }));
+    }
+
+    if (!blackMarketState.affinityBoostedInCycle) {
+      setNpcAffinities((prev) => ({
+        ...prev,
+        badger_merchant: clamp((prev.badger_merchant ?? 10) + 2, 0, 100),
+      }));
+    }
+
+    setBlackMarketState((prev) => ({
+      ...prev,
+      affinityBoostedInCycle: true,
+      offers: prev.offers.map((item) =>
+        item.id === offer.id
+          ? { ...item, purchasedCount: item.purchasedCount + 1 }
+          : item
+      ),
+    }));
+    setBlackMarketNotice(noticeText);
+  };
+
+  const handleSellItemToBlackMarket = (inventoryIndex: number) => {
+    if (phase !== 'PLAYING' || isLoading) return;
+    const targetItem = stats.inventory[inventoryIndex];
+    if (!targetItem) return;
+    const sellPrice = estimateItemSellPrice(targetItem);
+    if (sellPrice === null) {
+      setBlackMarketNotice('「黃金黑松露」是王國至寶，泥巴獾不敢收購！');
+      return;
+    }
+
+    retroAudio.playCoin();
+    setStats((prev) => {
+      const nextInventory = [...prev.inventory];
+      nextInventory.splice(inventoryIndex, 1);
+      return {
+        ...prev,
+        coins: prev.coins + sellPrice,
+        inventory: nextInventory,
+      };
+    });
+
+    if (!blackMarketState.affinityBoostedInCycle) {
+      setNpcAffinities((prev) => ({
+        ...prev,
+        badger_merchant: clamp((prev.badger_merchant ?? 10) + 1, 0, 100),
+      }));
+      setBlackMarketState((prev) => ({
+        ...prev,
+        affinityBoostedInCycle: true,
+      }));
+    }
+
+    setBlackMarketNotice(`賣出「${targetItem}」，入手 +${sellPrice} 枚豬豬幣！`);
+  };
+
+  const handleSellDuplicateClutter = () => {
+    if (phase !== 'PLAYING' || isLoading) return;
+    const summary = findDuplicateSellableClutter(stats.inventory, stats.equipment);
+    if (summary.indicesToSell.length === 0) {
+      setBlackMarketNotice('目前背包沒有可一鍵清倉的重複雜物。');
+      return;
+    }
+
+    const sellIndexSet = new Set(summary.indicesToSell);
+    retroAudio.playCoin();
+    setStats((prev) => ({
+      ...prev,
+      coins: prev.coins + summary.totalCoins,
+      inventory: prev.inventory.filter((_, idx) => !sellIndexSet.has(idx)),
+    }));
+
+    if (!blackMarketState.affinityBoostedInCycle) {
+      setNpcAffinities((prev) => ({
+        ...prev,
+        badger_merchant: clamp((prev.badger_merchant ?? 10) + 1, 0, 100),
+      }));
+      setBlackMarketState((prev) => ({
+        ...prev,
+        affinityBoostedInCycle: true,
+      }));
+    }
+
+    setBlackMarketNotice(
+      `一鍵清倉 ${summary.itemsToSell.length} 件重複道具，爽賺 +${summary.totalCoins} 枚豬豬幣！`
+    );
+  };
+
+  const handleRerollBlackMarket = () => {
+    if (phase !== 'PLAYING' || isLoading) return;
+    if (stats.coins < BLACK_MARKET_REROLL_COST) {
+      setBlackMarketNotice(`豬豬幣不足 ${BLACK_MARKET_REROLL_COST} 枚，無法刷新貨架！`);
+      return;
+    }
+    retroAudio.playClick();
+    const nextReroll = blackMarketState.rerollCount + 1;
+    setStats((prev) => ({
+      ...prev,
+      coins: Math.max(0, prev.coins - BLACK_MARKET_REROLL_COST),
+    }));
+    setBlackMarketState((prev) => ({
+      ...prev,
+      rerollCount: nextReroll,
+      offers: generateBlackMarketOffers(prev.cycleIndex, nextReroll),
+    }));
+    setBlackMarketNotice(`花費 ${BLACK_MARKET_REROLL_COST} 幣請泥巴獾換上全新秘密貨物！`);
+  };
+
   const handleSubmitCustomAction = (e: React.FormEvent) => {
     e.preventDefault();
     if (phase !== 'PLAYING' || isLoading || !customAction.trim()) return;
@@ -1707,6 +2086,7 @@ export default function App() {
       if (
         isLeaderboardOpen ||
         isSkillTreeOpen ||
+        isBlackMarketOpen ||
         compendiumModalState.open ||
         phase !== 'PLAYING' ||
         isLoading
@@ -1729,6 +2109,7 @@ export default function App() {
   }, [
     isLeaderboardOpen,
     isSkillTreeOpen,
+    isBlackMarketOpen,
     compendiumModalState.open,
     phase,
     isLoading,
@@ -1742,6 +2123,17 @@ export default function App() {
     () => Boolean(activeQuest && findQuestTargetIndex(stats.inventory, activeQuest) !== -1),
     [activeQuest, stats.inventory]
   );
+  const hasActiveSeasonalItem = useMemo(
+    () =>
+      Boolean(
+        activeSeasonalQuest &&
+          findSeasonalTargetIndex(stats.inventory, activeSeasonalQuest) !== -1
+      ),
+    [activeSeasonalQuest, stats.inventory]
+  );
+  const seasonalRemainingTurns = activeSeasonalQuest
+    ? Math.max(0, activeSeasonalQuest.expiresAtTurn - turn)
+    : 0;
   const skillModifiers = useMemo(
     () => calculateSkillModifiers(stats.learnedSkillIds, stats.masteryRanks),
     [stats.learnedSkillIds, stats.masteryRanks]
@@ -2133,6 +2525,22 @@ export default function App() {
 
           <div className="flex items-center gap-2 shrink-0 flex-wrap lg:justify-end">
             <PWAInstallButton />
+
+            {phase === 'PLAYING' && (
+              <button
+                type="button"
+                onClick={() => {
+                  retroAudio.playClick();
+                  setBlackMarketNotice(null);
+                  setIsBlackMarketOpen(true);
+                }}
+                className="pixel-btn bg-[#2c2112] hover:bg-[#3f2f19] border-[#d99b26] text-[#ffd95a] px-3 py-1.5 text-xs sm:text-sm font-medium flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+                title="拜訪泥巴獾流動黑市，消費豬豬幣或清倉重複道具"
+              >
+                <Store className="w-4 h-4 text-[#ffd95a]" />
+                <span>豬豬黑市</span>
+              </button>
+            )}
 
             <button
               type="button"
@@ -2917,6 +3325,62 @@ export default function App() {
                     </div>
                   )}
 
+                  {entry.seasonalEvent && (
+                    <div
+                      className={`px-3 py-2 border flex items-start gap-2.5 text-xs ${
+                        entry.seasonalEvent.type === 'completed'
+                          ? 'bg-[#2a2210] border-[#ffd95a]'
+                          : entry.seasonalEvent.type === 'expired'
+                          ? 'bg-[#201916] border-[#6b5544]'
+                          : 'bg-[#281e12] border-[#f3b562]'
+                      }`}
+                    >
+                      <Calendar
+                        className={`w-4 h-4 shrink-0 mt-0.5 ${
+                          entry.seasonalEvent.type === 'expired'
+                            ? 'text-[#b8a58d]'
+                            : 'text-[#ffd95a]'
+                        }`}
+                      />
+                      <div className="min-w-0 space-y-0.5">
+                        <p
+                          className={`font-pixel ${
+                            entry.seasonalEvent.type === 'expired'
+                              ? 'text-[#cbb89e]'
+                              : 'text-[#ffd95a]'
+                          }`}
+                        >
+                          {entry.seasonalEvent.type === 'completed'
+                            ? `節慶圓滿達成！「${entry.seasonalEvent.title}」`
+                            : entry.seasonalEvent.type === 'expired'
+                            ? `節慶落幕：「${entry.seasonalEvent.title}」已結束`
+                            : `${entry.seasonalEvent.seasonLabel} · 限時節慶開跑「${entry.seasonalEvent.title}」！`}
+                        </p>
+                        {entry.seasonalEvent.type === 'triggered' && (
+                          <p className="text-[#dfd4c1] leading-relaxed">
+                            目標尋獲「{entry.seasonalEvent.targetItem}」（第{' '}
+                            {entry.seasonalEvent.expiresAtTurn} 回合結束後失效 · 賞金{' '}
+                            {entry.seasonalEvent.rewardCoins} 豬豬幣＋
+                            {entry.seasonalEvent.rewardItem}＋
+                            {entry.seasonalEvent.rewardTrufflePoints} 松露點數）
+                          </p>
+                        )}
+                        {entry.seasonalEvent.type === 'completed' && (
+                          <p className="text-[#9fd67a] font-medium">
+                            慶典賞賜：+{entry.seasonalEvent.rewardCoins ?? 0} 豬豬幣、限定寶物「
+                            {entry.seasonalEvent.rewardItem}」、+
+                            {entry.seasonalEvent.rewardTrufflePoints ?? 0} 松露點數！
+                          </p>
+                        )}
+                        {entry.seasonalEvent.type === 'expired' && (
+                          <p className="text-[#b8a58d]">
+                            可惜未能在期限內收集並交付「{entry.seasonalEvent.targetItem}」，慶典熱潮散去。
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
                   {entry.levelUp && (
                     <div className="px-3 py-2 border bg-[#1c2818] border-[#7ce06b] flex items-start gap-2.5 text-xs">
                       <ArrowUpCircle className="w-4 h-4 text-[#7ce06b] shrink-0 mt-0.5" />
@@ -3235,7 +3699,7 @@ export default function App() {
           {/* BOTTOM ACTION CONTROLS */}
           {phase === 'PLAYING' && (
             <div className="border-t-2 border-[#4a3525] pt-2.5 sm:pt-3 space-y-2.5 sm:space-y-3 shrink-0">
-              {(stats.skillPoints > 0 || hasActiveQuestItem) && (
+              {(stats.skillPoints > 0 || hasActiveQuestItem || hasActiveSeasonalItem || stats.inventory.length >= 4 || stats.coins >= 25) && (
                 <div className="flex lg:hidden flex-wrap items-center gap-2">
                   {stats.skillPoints > 0 && (
                     <button
@@ -3255,6 +3719,73 @@ export default function App() {
                     >
                       <ScrollText className="w-3.5 h-3.5 text-[#ffd95a]" />
                       <span>委託道具已齊全，點此交付 →</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      retroAudio.playClick();
+                      setBlackMarketNotice(null);
+                      setIsBlackMarketOpen(true);
+                    }}
+                    className="pixel-btn bg-[#2c2112] border-[#d99b26] text-[#ffd95a] px-2.5 py-1.5 text-xs font-medium flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Store className="w-3.5 h-3.5 text-[#ffd95a]" />
+                    <span>豬豬黑市</span>
+                  </button>
+                </div>
+              )}
+
+              {activeSeasonalQuest && (
+                <div className="pixel-panel-inner border-[#d99b26] bg-[#241b0f] px-3 py-2 flex flex-wrap items-center justify-between gap-2">
+                  <div className="min-w-0 flex-1 space-y-0.5">
+                    <div className="text-xs font-pixel text-[#ffd95a] flex items-center gap-1.5 truncate">
+                      <Calendar className="w-3.5 h-3.5 shrink-0 text-[#f3b562]" />
+                      <span className="truncate">
+                        {activeSeasonalQuest.title}（{activeSeasonalQuest.seasonLabel}）
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-[#dfd4c1] font-num truncate">
+                      目標：{activeSeasonalQuest.targetItem} ·{' '}
+                      <span
+                        className={
+                          seasonalRemainingTurns <= 1
+                            ? 'text-[#ff9b8c] font-bold'
+                            : 'text-[#9fd67a]'
+                        }
+                      >
+                        {seasonalRemainingTurns === 0
+                          ? '本回合最後機會！'
+                          : `剩 ${seasonalRemainingTurns} 回合失效`}
+                      </span>
+                    </p>
+                  </div>
+                  {hasActiveSeasonalItem ? (
+                    <button
+                      type="button"
+                      disabled={isLoading}
+                      onClick={() =>
+                        executeTurn(
+                          false,
+                          `將「${activeSeasonalQuest.targetItem}」獻上並參加「${activeSeasonalQuest.title}」領賞`
+                        )
+                      }
+                      className="pixel-btn pixel-btn-primary px-3 py-1.5 min-h-[36px] text-xs font-bold shrink-0 cursor-pointer disabled:opacity-50"
+                    >
+                      立即參加領賞
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={isLoading}
+                      onClick={() => {
+                        retroAudio.playClick();
+                        setCustomAction(activeSeasonalQuest.clueHint);
+                        window.setTimeout(() => inputRef.current?.focus(), 40);
+                      }}
+                      className="pixel-btn bg-[#3a2a16] hover:bg-[#4e381d] border-[#8f6a28] text-[#ffd95a] px-3 py-1.5 min-h-[36px] text-xs font-medium shrink-0 cursor-pointer disabled:opacity-50"
+                    >
+                      帶入節慶線索
                     </button>
                   )}
                 </div>
@@ -3501,6 +4032,86 @@ export default function App() {
             ) : (
               <div className="pixel-panel-inner p-3.5 text-xs text-[#9c8a74] leading-relaxed">
                 目前尚無進行中的委託。繼續在泥巴王國探索，路邊的森林住民隨時可能會向你求助！
+              </div>
+            )}
+
+            {activeSeasonalQuest && (
+              <div className="pixel-panel-inner p-3 space-y-2.5 border-[#d99b26] bg-[#241b0f]">
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between gap-2 text-[11px]">
+                    <span className="text-[#f3b562] flex items-center gap-1 truncate">
+                      <Calendar className="w-3.5 h-3.5 shrink-0" />
+                      <span className="truncate">{activeSeasonalQuest.seasonLabel}</span>
+                    </span>
+                    <span
+                      className={`font-num font-bold shrink-0 ${
+                        seasonalRemainingTurns <= 1 ? 'text-[#ff9b8c]' : 'text-[#ffd95a]'
+                      }`}
+                    >
+                      {seasonalRemainingTurns === 0
+                        ? '最後 1 回合！'
+                        : `剩 ${seasonalRemainingTurns} 回合`}
+                    </span>
+                  </div>
+                  <h3 className="font-pixel text-sm text-[#ffd95a] leading-snug">
+                    {activeSeasonalQuest.title}
+                  </h3>
+                  <p className="text-xs text-[#dfd4c1] leading-relaxed">
+                    {activeSeasonalQuest.description}
+                  </p>
+                </div>
+
+                <div className="bg-[#17110d] border border-[#3c2b1e] px-2.5 py-2 space-y-1 text-xs">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[#b8a58d]">節慶目標</span>
+                    <span
+                      className={`font-medium ${
+                        hasActiveSeasonalItem ? 'text-[#7ce06b]' : 'text-[#f5ebd9]'
+                      }`}
+                    >
+                      {activeSeasonalQuest.targetItem}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[#b8a58d]">限定報酬</span>
+                    <span className="text-[#ffd95a] font-num text-right">
+                      {activeSeasonalQuest.rewardCoins} 幣 ＋ {activeSeasonalQuest.rewardItem} ＋{' '}
+                      {activeSeasonalQuest.rewardTrufflePoints} 松露點
+                    </span>
+                  </div>
+                </div>
+
+                {phase === 'PLAYING' &&
+                  (hasActiveSeasonalItem ? (
+                    <button
+                      type="button"
+                      disabled={isLoading}
+                      onClick={() => {
+                        setMobileTab('adventure');
+                        executeTurn(
+                          false,
+                          `將「${activeSeasonalQuest.targetItem}」獻上並參加「${activeSeasonalQuest.title}」領賞`
+                        );
+                      }}
+                      className="pixel-btn pixel-btn-primary w-full py-2.5 min-h-[44px] px-3 text-xs font-bold cursor-pointer disabled:opacity-50"
+                    >
+                      立即參加節慶領賞
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={isLoading}
+                      onClick={() => {
+                        retroAudio.playClick();
+                        setCustomAction(activeSeasonalQuest.clueHint);
+                        setMobileTab('adventure');
+                        window.setTimeout(() => inputRef.current?.focus(), 40);
+                      }}
+                      className="pixel-btn bg-[#33251c] hover:bg-[#473326] w-full py-2.5 min-h-[44px] px-3 text-xs text-[#f5ebd9] cursor-pointer disabled:opacity-50"
+                    >
+                      帶入線索：{activeSeasonalQuest.clueHint}
+                    </button>
+                  ))}
               </div>
             )}
           </div>
@@ -3822,6 +4433,26 @@ export default function App() {
               點擊道具可帶入行動框，或點擊「主手 / 副手」將道具裝備至小豬身上獲得屬性加成。
             </p>
 
+            {phase === 'PLAYING' && (
+              <button
+                type="button"
+                onClick={() => {
+                  retroAudio.playClick();
+                  setBlackMarketNotice(null);
+                  setIsBlackMarketOpen(true);
+                }}
+                className="pixel-btn bg-[#2c2112] hover:bg-[#3f2f19] border-[#d99b26] text-[#ffd95a] w-full px-3 py-2.5 min-h-[44px] text-xs font-bold flex items-center justify-between gap-2 cursor-pointer"
+              >
+                <span className="flex items-center gap-1.5">
+                  <Store className="w-4 h-4 text-[#ffd95a]" />
+                  <span>造訪泥巴獾豬豬黑市</span>
+                </span>
+                <span className="font-num text-[11px] text-[#9fd67a]">
+                  買食材／一鍵賣重複雜物 →
+                </span>
+              </button>
+            )}
+
             {craftNotice && (
               <div className="pixel-panel-inner border-[#d99b26] px-3 py-2 text-xs text-[#ffd95a] leading-relaxed">
                 {craftNotice}
@@ -4116,6 +4747,21 @@ export default function App() {
         allUnlockedAchievementIds={allUnlockedIds}
         isInActiveRun={phase === 'PLAYING'}
         onPurchaseUpgrade={handlePurchaseLegacyUpgrade}
+      />
+      <BlackMarketModal
+        isOpen={isBlackMarketOpen}
+        onClose={() => setIsBlackMarketOpen(false)}
+        coins={stats.coins}
+        inventory={stats.inventory}
+        equipment={stats.equipment}
+        badgerAffinity={npcAffinities.badger_merchant ?? 10}
+        marketState={blackMarketState}
+        marketNotice={blackMarketNotice}
+        canTransact={phase === 'PLAYING' && !isLoading}
+        onBuyOffer={handleBuyBlackMarketOffer}
+        onSellItem={handleSellItemToBlackMarket}
+        onSellDuplicates={handleSellDuplicateClutter}
+        onRerollMarket={handleRerollBlackMarket}
       />
       <OfflineIndicator />
     </div>
