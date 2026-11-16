@@ -170,6 +170,81 @@ export interface NpcAffinityEvent {
   proactiveClue: string | null;
 }
 
+export type RegionId =
+  | 'mud_village'
+  | 'truffle_forest'
+  | 'goblin_kitchen'
+  | 'wolf_canyon'
+  | 'truffle_sanctum'
+  | 'endless_abyss';
+
+export interface ActiveBossState {
+  id: string;
+  regionId: RegionId;
+  name: string;
+  title: string;
+  hp: number;
+  maxHp: number;
+  attackPower: number;
+  rewardCoins: number;
+  rewardItem: string;
+  trufflePointsReward: number;
+}
+
+export interface BossLogEvent {
+  type: 'spawned' | 'hit' | 'defeated';
+  bossName: string;
+  bossTitle: string;
+  regionName: string;
+  damageDealt: number;
+  isCrit?: boolean;
+  bossHpAfter: number;
+  bossMaxHp: number;
+  rewardCoins?: number;
+  rewardItem?: string;
+  trufflePointsEarned?: number;
+  nextRegionName?: string | null;
+}
+
+export type LegacyUpgradeId =
+  | 'heirloom_hp'
+  | 'heirloom_hunger'
+  | 'heirloom_coins'
+  | 'heirloom_xp'
+  | 'heirloom_spoon'
+  | 'heirloom_amulet';
+
+export type LegacyUpgradesMap = Record<LegacyUpgradeId, number>;
+
+export interface MetaProgressionState {
+  trufflePoints: number;
+  totalRuns: number;
+  bestTurn: number;
+  bestScore: number;
+  legacyUpgrades: LegacyUpgradesMap;
+  discoveredItems: string[];
+  defeatedBossIds: string[];
+  reachedRegionIds: RegionId[];
+  befriendedNpcIds: NpcId[];
+}
+
+export type FoodBuffId = 'warm_soup' | 'spicy_roast' | 'herbal_tea' | 'truffle_bisque';
+
+export interface ActiveFoodBuff {
+  id: FoodBuffId;
+  dishName: string;
+  effectLabel: string;
+  remainingTurns: number;
+  maxTurns: number;
+  ignoreNightExtraDrain?: boolean;
+  hungerSaveFlat?: number;
+  attackBonus?: number;
+  damageReductionBonus?: number;
+  regenHpPerTurn?: number;
+  coinGainBonusRatio?: number;
+  itemDiscoveryBonus?: number;
+}
+
 export interface LogEntry {
   id: string;
   turn: number;
@@ -187,6 +262,9 @@ export interface LogEntry {
   bonusForagedItem?: string | null;
   npcAffinityEvent?: NpcAffinityEvent | null;
   cheatDeathTriggered?: boolean;
+  bossEvent?: BossLogEvent | null;
+  regionName?: string;
+  expiredBuffNames?: string[];
 }
 
 export interface GameOverSummary {

@@ -18,21 +18,23 @@ export const EMPTY_EQUIPMENT: EquipmentState = {
 export function getItemEquipmentProfile(itemName: string): ItemEquipmentProfile {
   const lower = itemName.trim().toLowerCase();
 
-  // High-tier crafted or quest weapons
+  // High-tier crafted, boss legendary, or quest weapons
   if (
     lower.includes('狼牙棒') ||
     lower.includes('黃金鍋鏟') ||
     lower.includes('聖劍') ||
+    lower.includes('獠牙鍋鏟') ||
     lower.includes('傳說')
   ) {
+    const isBossWeapon = lower.includes('傳說') || lower.includes('獠牙鍋鏟');
     return {
       recommendedSlot: 'mainHand',
-      categoryLabel: '強效武器',
-      attackBonus: 5,
-      defenseBonus: 1,
+      categoryLabel: isBossWeapon ? '傳說武器' : '強效武器',
+      attackBonus: isBossWeapon ? 6 : 5,
+      defenseBonus: isBossWeapon ? 2 : 1,
       hungerSaveBonus: 0,
       coinBonus: 0,
-      effectSummary: '攻擊 +5 · 防禦 +1',
+      effectSummary: isBossWeapon ? '攻擊 +6 · 防禦 +2' : '攻擊 +5 · 防禦 +1',
     };
   }
 
@@ -66,25 +68,31 @@ export function getItemEquipmentProfile(itemName: string): ItemEquipmentProfile 
     };
   }
 
-  // Defensive & magical protective gear
+  // Defensive & magical protective gear (including Boss crowns/shields/badges)
   if (
     lower.includes('盾') ||
     lower.includes('鍋蓋') ||
     lower.includes('護符') ||
+    lower.includes('皇冠') ||
+    lower.includes('徽章') ||
     lower.includes('甲') ||
     lower.includes('盔') ||
     lower.includes('斗篷') ||
     lower.includes('戒') ||
     lower.includes('傘')
   ) {
+    const isLegendaryShield =
+      lower.includes('傳說') || lower.includes('皇冠') || lower.includes('徽章');
     return {
       recommendedSlot: 'offHand',
-      categoryLabel: '防護裝備',
-      attackBonus: 0,
-      defenseBonus: 4,
-      hungerSaveBonus: 1,
-      coinBonus: 0,
-      effectSummary: '防禦 +4 · 省糧 +1',
+      categoryLabel: isLegendaryShield ? '傳說護具' : '防護裝備',
+      attackBonus: isLegendaryShield ? 1 : 0,
+      defenseBonus: isLegendaryShield ? 5 : 4,
+      hungerSaveBonus: isLegendaryShield ? 2 : 1,
+      coinBonus: isLegendaryShield ? 2 : 0,
+      effectSummary: isLegendaryShield
+        ? '攻擊 +1 · 防禦 +5 · 省糧 +2 · 尋寶 +2幣'
+        : '防禦 +4 · 省糧 +1',
     };
   }
 

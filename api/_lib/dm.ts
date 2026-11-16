@@ -181,6 +181,21 @@ export interface TurnRequestBody {
     tierLabel: string;
     perkLabel: string;
   }> | null;
+  regionContext?: {
+    regionName: string;
+    regionSubtitle: string;
+    bossMode?: 'SPAWNED' | 'ONGOING' | 'NONE';
+    bossName?: string;
+    bossTitle?: string;
+    bossHp?: number;
+    bossMaxHp?: number;
+    bossSummary?: string;
+  } | null;
+  activeBuffs?: Array<{
+    dishName: string;
+    remainingTurns: number;
+    effectLabel: string;
+  }> | null;
 }
 
 export interface EpitaphRequestBody {
@@ -375,12 +390,33 @@ function buildTurnPrompt(body: TurnRequestBody): {
           .join('｜')}`
       : '';
 
+  const foodBuffsText =
+    Array.isArray(body.activeBuffs) && body.activeBuffs.length > 0
+      ? `\n- 料理增益：${body.activeBuffs
+          .map((b) => `${b.dishName}(剩${b.remainingTurns}回合：${b.effectLabel})`)
+          .join('｜')}`
+      : '';
+
+  const rc = body.regionContext;
+  let regionPrompt = '';
+  if (rc) {
+    regionPrompt = `\n【所在區域】${rc.regionName}（${rc.regionSubtitle}）`;
+    if (!isStart && rc.bossMode === 'SPAWNED' && rc.bossName) {
+      regionPrompt += `\n【守關 Boss 登場！${rc.bossName}（${rc.bossTitle ?? ''}）HP ${rc.bossHp}/${rc.bossMaxHp}】${
+        rc.bossSummary ?? ''
+      } 請讓此 Boss 氣勢十足地登場並開啟激戰（Boss 血量與戰利品由系統結算，請給出 3 個對抗 Boss 的創意選項）。`;
+    } else if (!isStart && rc.bossMode === 'ONGOING' && rc.bossName) {
+      regionPrompt += `\n【Boss 激戰中：${rc.bossName} 剩餘 HP ${rc.bossHp}/${rc.bossMaxHp}】請描寫小豬與 Boss 的激烈攻防（Boss 傷害與擊敗獎勵由系統結算，請在選項中持續提供戰鬥、智取或周旋對策）。`;
+    }
+    regionPrompt += '\n';
+  }
+
   const userPrompt = isStart
     ? `【第 1 回合開局】
 狀態：HP ${stats.hp}/100｜飽食 ${stats.hunger}/100｜豬豬幣 ${stats.coins}｜背包：${stats.inventory.join('、')}
 ${equipmentText}
 ${skillText}
-${npcAffinitiesText}${worldCyclePrompt}
+${npcAffinitiesText}${foodBuffsText}${worldCyclePrompt}${regionPrompt}
 撰寫小豬剛離開泥巴村莊尋找黃金黑松露的第 1 回合奇遇（所有數值變化與物品增減皆須為 0 / null）。`
     : `【第 ${turn} 回合】
 近期紀錄：
@@ -389,7 +425,7 @@ ${historySummary}
 狀態：HP ${stats.hp}/100｜飽食 ${stats.hunger}/100${stats.hunger <= 0 ? '（飢餓扣血中！）' : ''}｜豬豬幣 ${stats.coins}｜背包：${stats.inventory.join('、') || '空'}
 ${equipmentText}
 ${skillText}
-${npcAffinitiesText}${worldCyclePrompt}${randomEventPrompt}${questPrompt}
+${npcAffinitiesText}${foodBuffsText}${worldCyclePrompt}${regionPrompt}${randomEventPrompt}${questPrompt}
 玩家行動：「${action}」
 推進劇情、結算合理數值與道具變化，並給出 3 個新選項與英文像素場景提示詞。`;
 

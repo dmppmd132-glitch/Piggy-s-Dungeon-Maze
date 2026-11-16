@@ -3,26 +3,32 @@ import {
   ArrowUpCircle,
   Award,
   Backpack,
+  BookOpen,
   Check,
   CloudRain,
   Compass,
+  Crown,
+  Flame,
   FolderOpen,
   Gift,
   GitBranch,
   Hammer,
   Heart,
+  Map as WorldMapIcon,
   Moon,
   RotateCcw,
   ScrollText,
   Send,
   Shield,
   Skull,
+  Soup,
   Sparkles,
   Sun,
   Sunrise,
   Sunset,
   Swords,
   Trophy,
+  Utensils,
   Volume2,
   VolumeX,
   Zap,
@@ -60,6 +66,15 @@ import {
   type AvailableCraft,
 } from './utils/crafting';
 import {
+  activateOrRefreshFoodBuff,
+  applyCooking,
+  calculateFoodBuffModifiers,
+  findAvailableCookingRecipes,
+  normalizeActiveFoodBuffs,
+  tickFoodBuffs,
+  type AvailableCookingDish,
+} from './utils/cooking';
+import {
   evaluateTurnAchievements,
   HIDDEN_ACHIEVEMENTS,
   INITIAL_COUNTERS,
@@ -90,6 +105,7 @@ import {
   unequipSlot,
 } from './utils/equipment';
 import { SkillTreeModal } from './components/SkillTreeModal';
+import { CompendiumModal } from './components/CompendiumModal';
 import {
   advanceLevelAndXp,
   calculateSkillModifiers,
@@ -120,18 +136,35 @@ import {
   pickNpcClue,
   type NpcAffinityMap,
 } from './utils/npcAffinity';
+import {
+  getCurrentRegionState,
+  resolveBossTurnPostCall,
+  resolveBossTurnPreCall,
+} from './utils/regions';
+import {
+  calculateLegacyBonuses,
+  calculateRunEndTrufflePoints,
+  loadMetaProgression,
+  purchaseLegacyUpgrade,
+  saveMetaProgression,
+} from './utils/metaProgression';
 import type {
   AchievementCounters,
+  ActiveBossState,
+  ActiveFoodBuff,
   ActiveQuest,
   AppliedDeltas,
   DmTurnResponse,
   EquipSlot,
   GameOverSummary,
   GamePhase,
+  LegacyUpgradeId,
   LevelUpInfo,
   LogEntry,
   MasteryId,
+  MetaProgressionState,
   NpcAffinityEvent,
+  NpcId,
   PlayerStats,
   QuestLogEvent,
   SkillId,
@@ -194,6 +227,11 @@ interface SavedAdventureState {
   activeQuest?: ActiveQuest | null;
   completedQuestIds?: string[];
   npcAffinities?: NpcAffinityMap;
+  activeBoss?: ActiveBossState | null;
+  defeatedBossIds?: string[];
+  activeBuffs?: ActiveFoodBuff[];
+  runTrufflePointsClaimed?: boolean;
+  lastRunTruffleReward?: number;
   savedAt: string;
 }
 
@@ -258,6 +296,12 @@ function loadSavedAdventure(): SavedAdventureState | null {
       activeQuest: parsed.activeQuest ?? null,
       completedQuestIds: Array.isArray(parsed.completedQuestIds) ? parsed.completedQuestIds : [],
       npcAffinities: normalizeNpcAffinities(parsed.npcAffinities),
+      activeBoss: parsed.activeBoss ?? null,
+      defeatedBossIds: Array.isArray(parsed.defeatedBossIds) ? parsed.defeatedBossIds : [],
+      activeBuffs: normalizeActiveFoodBuffs(parsed.activeBuffs),
+      runTrufflePointsClaimed: Boolean(parsed.runTrufflePointsClaimed),
+      lastRunTruffleReward:
+        typeof parsed.lastRunTruffleReward === 'number' ? parsed.lastRunTruffleReward : 0,
       savedAt: typeof parsed.savedAt === 'string' ? parsed.savedAt : '',
     };
   } catch {
@@ -298,6 +342,12 @@ export default function App() {
   const [isLeaderboardOpen, setIsLeaderboardOpen] = useState<boolean>(false);
   const [playerNickname, setPlayerNickname] = useState<string>(() => loadSavedNickname());
   const [craftNotice, setCraftNotice] = useState<string | null>(null);
+  const [cookNotice, setCookNotice] = useState<string | null>(null);
+  const [cookingFeedback, setCookingFeedback] = useState<{
+    key: number;
+    buffId: ActiveFoodBuff['id'];
+    dishName: string;
+  } | null>(null);
   const [equipNotice, setEquipNotice] = useState<string | null>(null);
   const [skillNotice, setSkillNotice] = useState<string | null>(null);
   const [isSkillTreeOpen, setIsSkillTreeOpen] = useState<boolean>(false);
@@ -311,6 +361,18 @@ export default function App() {
     'adventure'
   );
   const [streamingStory, setStreamingStory] = useState<string>('');
+  const [activeBoss, setActiveBoss] = useState<ActiveBossState | null>(null);
+  const [defeatedBossIds, setDefeatedBossIds] = useState<string[]>([]);
+  const [activeBuffs, setActiveBuffs] = useState<ActiveFoodBuff[]>([]);
+  const [runTrufflePointsClaimed, setRunTrufflePointsClaimed] = useState<boolean>(false);
+  const [lastRunTruffleReward, setLastRunTruffleReward] = useState<number>(0);
+  const [metaProgression, setMetaProgression] = useState<MetaProgressionState>(() =>
+    loadMetaProgression()
+  );
+  const [compendiumModalState, setCompendiumModalState] = useState<{
+    open: boolean;
+    tab: 'legacy' | 'compendium';
+  }>({ open: false, tab: 'legacy' });
 
   const handleNicknameChange = useCallback((name: string) => {
     const saved = saveNickname(name);
@@ -320,6 +382,15 @@ export default function App() {
   const logBottomRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const streamedEntryIdsRef = useRef<Set<string>>(new Set());
+  const cookingFeedbackTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (cookingFeedbackTimerRef.current !== null) {
+        window.clearTimeout(cookingFeedbackTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
@@ -327,6 +398,10 @@ export default function App() {
     });
     return () => unsubscribe();
   }, []);
+
+  useEffect(() => {
+    saveMetaProgression(metaProgression);
+  }, [metaProgression]);
 
   // Serialize and persist current adventure state to localStorage
   useEffect(() => {
@@ -347,6 +422,11 @@ export default function App() {
         activeQuest,
         completedQuestIds,
         npcAffinities,
+        activeBoss,
+        defeatedBossIds,
+        activeBuffs,
+        runTrufflePointsClaimed,
+        lastRunTruffleReward,
         savedAt: new Date().toISOString(),
       };
       window.localStorage.setItem(SAVE_GAME_KEY, JSON.stringify(payload));
@@ -369,6 +449,11 @@ export default function App() {
     activeQuest,
     completedQuestIds,
     npcAffinities,
+    activeBoss,
+    defeatedBossIds,
+    activeBuffs,
+    runTrufflePointsClaimed,
+    lastRunTruffleReward,
   ]);
 
   useEffect(() => {
@@ -400,10 +485,28 @@ export default function App() {
   const bestTitle = runUnlocked.length > 0 ? runUnlocked[runUnlocked.length - 1].title : '';
   const activeTalent = useMemo(() => getTalentById(stats.talentId), [stats.talentId]);
   const worldCycle = useMemo(() => getWorldCycleState(turn), [turn]);
+  const regionProgress = useMemo(
+    () => getCurrentRegionState(defeatedBossIds, turn, activeBoss),
+    [defeatedBossIds, turn, activeBoss]
+  );
+  const legacyBonuses = useMemo(
+    () => calculateLegacyBonuses(metaProgression.legacyUpgrades),
+    [metaProgression.legacyUpgrades]
+  );
 
   const availableCrafts = useMemo(
     () => findAvailableCrafts(stats.inventory),
     [stats.inventory]
+  );
+
+  const availableCookingDishes = useMemo(
+    () => findAvailableCookingRecipes(stats.inventory),
+    [stats.inventory]
+  );
+
+  const foodBuffMods = useMemo(
+    () => calculateFoodBuffModifiers(activeBuffs),
+    [activeBuffs]
   );
 
   const craftByInventoryIndex = useMemo(() => {
@@ -477,12 +580,20 @@ export default function App() {
       setLastFailedRequest(null);
 
       const baseStats = isStart ? overrideStartStats ?? stats : stats;
+      const baseBuffs = isStart ? [] : activeBuffs;
+      const turnFoodBuffMods = calculateFoodBuffModifiers(baseBuffs);
       const nextTurnNumber = isStart ? 1 : turn + 1;
       const nextWorldCycle = getWorldCycleState(nextTurnNumber);
       const turnSkillMods = calculateSkillModifiers(
         baseStats.learnedSkillIds,
         baseStats.masteryRanks
       );
+      const bossPre = resolveBossTurnPreCall({
+        isStart,
+        nextTurnNumber,
+        defeatedBossIds: isStart ? [] : defeatedBossIds,
+        currentBoss: isStart ? null : activeBoss,
+      });
       const rolledEvent = isStart
         ? null
         : rollRandomEvent(nextTurnNumber, nextWorldCycle, turnSkillMods.surpriseEventBonusChance);
@@ -615,6 +726,25 @@ export default function App() {
               hungerReductionPercent: Math.round((1 - turnSkillMods.hungerDrainMultiplier) * 100),
             },
             npcAffinities: npcAffinitiesPayload,
+            regionContext: {
+              regionName: bossPre.region.name,
+              regionSubtitle: bossPre.region.subtitle,
+              bossMode: bossPre.bossBeforeTurn
+                ? bossPre.isNewlySpawned
+                  ? ('SPAWNED' as const)
+                  : ('ONGOING' as const)
+                : ('NONE' as const),
+              bossName: bossPre.bossBeforeTurn?.name,
+              bossTitle: bossPre.bossBeforeTurn?.title,
+              bossHp: bossPre.bossBeforeTurn?.hp,
+              bossMaxHp: bossPre.bossBeforeTurn?.maxHp,
+              bossSummary: bossPre.region.boss.dmSummary,
+            },
+            activeBuffs: baseBuffs.map((b) => ({
+              dishName: b.dishName,
+              remainingTurns: b.remainingTurns,
+              effectLabel: b.effectLabel,
+            })),
           }),
         });
 
@@ -703,11 +833,16 @@ export default function App() {
         const combinedHungerDrainMult =
           baseStats.modifiers.hungerDrainMultiplier * turnSkillMods.hungerDrainMultiplier;
         if (!isStart) {
-          if (rawHungerDelta <= 0 && nextWorldCycle.modifiers.extraHungerDrain > 0) {
+          if (
+            rawHungerDelta <= 0 &&
+            nextWorldCycle.modifiers.extraHungerDrain > 0 &&
+            !turnFoodBuffMods.ignoreNightExtraDrain
+          ) {
             rawHungerDelta -= nextWorldCycle.modifiers.extraHungerDrain;
           }
-          if (rawHungerDelta < 0 && equipBonuses.hungerSaveBonus > 0) {
-            rawHungerDelta = -Math.max(1, Math.abs(rawHungerDelta) - equipBonuses.hungerSaveBonus);
+          const totalHungerSave = equipBonuses.hungerSaveBonus + turnFoodBuffMods.hungerSaveFlat;
+          if (rawHungerDelta < 0 && totalHungerSave > 0) {
+            rawHungerDelta = -Math.max(1, Math.abs(rawHungerDelta) - totalHungerSave);
           }
           if (rawHungerDelta > 0 && baseStats.modifiers.foodGainMultiplier !== 1) {
             rawHungerDelta = Math.max(
@@ -750,11 +885,16 @@ export default function App() {
         let rawHpDelta = isStart ? 0 : dm.hp_change;
         if (!isStart && rawHpDelta < 0) {
           const combatMitigation = Math.floor(
-            equipBonuses.defenseBonus + equipBonuses.attackBonus * 0.5
+            equipBonuses.defenseBonus +
+              (equipBonuses.attackBonus + turnFoodBuffMods.attackBonus) * 0.5
           );
           let reduced = Math.max(1, Math.abs(rawHpDelta) - combatMitigation);
-          if (turnSkillMods.damageReductionMultiplier !== 1) {
-            reduced = Math.max(1, Math.round(reduced * turnSkillMods.damageReductionMultiplier));
+          const effectiveDamageMult = Math.max(
+            0.4,
+            turnSkillMods.damageReductionMultiplier - turnFoodBuffMods.damageReductionBonus
+          );
+          if (effectiveDamageMult !== 1) {
+            reduced = Math.max(1, Math.round(reduced * effectiveDamageMult));
           }
           rawHpDelta = -reduced;
         }
@@ -784,8 +924,9 @@ export default function App() {
           rawNextHp = 1;
           cheatDeathTriggered = true;
         }
-        if (!isStart && rawNextHp > 0 && turnSkillMods.regenHpPerTurn > 0) {
-          rawNextHp += turnSkillMods.regenHpPerTurn;
+        const totalRegenHp = turnSkillMods.regenHpPerTurn + turnFoodBuffMods.regenHpPerTurn;
+        if (!isStart && rawNextHp > 0 && totalRegenHp > 0) {
+          rawNextHp += totalRegenHp;
         }
         const nextHp = clamp(rawNextHp, 0, baseStats.maxHp);
         const appliedHpChange = nextHp - baseStats.hp;
@@ -806,8 +947,10 @@ export default function App() {
         if (!isStart && rawCoinsDelta > 0 && equipBonuses.coinBonus > 0) {
           rawCoinsDelta += equipBonuses.coinBonus;
         }
-        if (!isStart && rawCoinsDelta > 0 && turnSkillMods.coinGainBonusRatio > 0) {
-          rawCoinsDelta += Math.max(1, Math.round(rawCoinsDelta * turnSkillMods.coinGainBonusRatio));
+        const totalCoinBonusRatio =
+          turnSkillMods.coinGainBonusRatio + turnFoodBuffMods.coinGainBonusRatio;
+        if (!isStart && rawCoinsDelta > 0 && totalCoinBonusRatio > 0) {
+          rawCoinsDelta += Math.max(1, Math.round(rawCoinsDelta * totalCoinBonusRatio));
         }
         if (!isStart && rawCoinsDelta > 0 && baseStats.modifiers.coinGainMultiplier > 1) {
           rawCoinsDelta = Math.max(
@@ -957,10 +1100,10 @@ export default function App() {
           }
         }
 
-        // Skill Tree passive item discovery bonus (Foraging Branch)
+        // Skill Tree + Food Buff passive item discovery bonus (Foraging Branch + Herbal Tea)
         const bonusForagedItem = !isStart
           ? rollSkillBonusForageItem(
-              turnSkillMods.itemDiscoveryBonus,
+              turnSkillMods.itemDiscoveryBonus + turnFoodBuffMods.itemDiscoveryBonus,
               Boolean(actuallyGained || rolledEvent?.event.tempItem),
               baseStats.learnedSkillIds.includes('foraging_5')
             )
@@ -976,6 +1119,34 @@ export default function App() {
         ) {
           nextCoins += turnSkillMods.bonusCoinOnItemFind;
           appliedCoinsChange = nextCoins - baseStats.coins;
+        }
+
+        // Resolve Region Boss Encounter & Loot
+        const bossPost = resolveBossTurnPostCall({
+          bossBeforeTurn: bossPre.bossBeforeTurn,
+          isNewlySpawned: bossPre.isNewlySpawned,
+          region: bossPre.region,
+          defeatedBossIds: isStart ? [] : defeatedBossIds,
+          actionText: cleanAction,
+          attackBonus: equipBonuses.attackBonus + turnFoodBuffMods.attackBonus,
+          level: baseStats.level,
+        });
+
+        let bossRewardFoundTruffle = false;
+        if (bossPost.bossEvent?.type === 'defeated') {
+          let bossCoins = bossPost.rewardCoins;
+          if (baseStats.modifiers.coinGainMultiplier > 1) {
+            bossCoins = Math.round(bossCoins * baseStats.modifiers.coinGainMultiplier);
+          }
+          nextCoins += bossCoins;
+          appliedCoinsChange = nextCoins - baseStats.coins;
+          if (bossPost.rewardItem) {
+            nextInventory.push(bossPost.rewardItem);
+            if (bossPost.rewardItem.includes('黃金黑松露')) {
+              bossRewardFoundTruffle = true;
+              setFoundTruffle(true);
+            }
+          }
         }
 
         const deltas: AppliedDeltas = {
@@ -1013,12 +1184,14 @@ export default function App() {
           isStart,
           foundItem: Boolean(actuallyGained || bonusForagedItem || rolledEvent?.event.tempItem),
           gainedCoins: appliedCoinsChange > 0,
-          completedQuest: turnQuestEvent?.type === 'completed',
+          completedQuest: turnQuestEvent?.type === 'completed' || bossPost.bossEvent?.type === 'defeated',
           unlockedAchievementsCount: newlyUnlocked.length,
         });
+        const totalXpMult =
+          turnSkillMods.xpGainMultiplier * legacyBonuses.xpMultiplier;
         const gainedXp =
           rawGainedXp > 0
-            ? Math.max(1, Math.round(rawGainedXp * turnSkillMods.xpGainMultiplier))
+            ? Math.max(1, Math.round(rawGainedXp * totalXpMult))
             : 0;
         const levelProgression = advanceLevelAndXp(
           baseStats.level,
@@ -1047,6 +1220,10 @@ export default function App() {
           streamedEntryIdsRef.current.add(entryId);
         }
 
+        const tickedFoodBuffs = isStart
+          ? { nextBuffs: [], expiredNames: [] }
+          : tickFoodBuffs(baseBuffs);
+
         const newEntry: LogEntry = {
           id: entryId,
           turn: nextTurnNumber,
@@ -1064,6 +1241,9 @@ export default function App() {
           bonusForagedItem,
           npcAffinityEvent: turnAffinityEvent,
           cheatDeathTriggered,
+          bossEvent: bossPost.bossEvent,
+          regionName: bossPre.region.name,
+          expiredBuffNames: tickedFoodBuffs.expiredNames,
         };
 
         const nextUnlockedRun = isStart
@@ -1073,7 +1253,9 @@ export default function App() {
           : runUnlocked;
         const nextFoundTruffle = isStart
           ? false
-          : foundTruffle || Boolean(actuallyGained && actuallyGained.includes('黃金黑松露'));
+          : foundTruffle ||
+            bossRewardFoundTruffle ||
+            Boolean(actuallyGained && actuallyGained.includes('黃金黑松露'));
 
         setStats(nextStats);
         setCounters(nextCounters);
@@ -1081,6 +1263,9 @@ export default function App() {
         setActiveQuest(nextActiveQuest);
         setCompletedQuestIds(nextCompletedQuestIds);
         setNpcAffinities(nextNpcAffinities);
+        setActiveBoss(bossPost.nextBoss);
+        setDefeatedBossIds(bossPost.nextDefeatedBossIds);
+        setActiveBuffs(tickedFoodBuffs.nextBuffs);
         if (newlyUnlocked.length > 0) {
           const mergedIds = Array.from(
             new Set([...allUnlockedIds, ...newlyUnlocked.map((a) => a.id)])
@@ -1098,14 +1283,57 @@ export default function App() {
         setCustomAction('');
         setSceneSeed((s) => s + 1);
 
-        if (firebaseUser && firebaseUser.emailVerified) {
-          const nextScore = calculateAdventureScore({
+        const nextScore = calculateAdventureScore({
+          turn: nextTurnNumber,
+          coins: nextCoins,
+          titleCount: nextUnlockedRun.length,
+          foundTruffle: nextFoundTruffle,
+          hp: nextHp,
+        });
+
+        // Update persistent Compendium & Meta-Progression Truffle Points
+        const newlyDiscovered = [
+          ...nextInventory,
+          ...(nextStats.equipment.mainHand ? [nextStats.equipment.mainHand] : []),
+          ...(nextStats.equipment.offHand ? [nextStats.equipment.offHand] : []),
+          ...(bossPost.rewardItem ? [bossPost.rewardItem] : []),
+        ];
+        const befriendedNow = MUD_KINGDOM_NPCS.filter(
+          (npc) => (nextNpcAffinities[npc.id] ?? 0) >= 70
+        ).map((npc) => npc.id) as NpcId[];
+
+        const isGameOverNow = nextHp <= 0;
+        let runEndBonusPoints = 0;
+        if (isGameOverNow && !runTrufflePointsClaimed) {
+          runEndBonusPoints = calculateRunEndTrufflePoints({
             turn: nextTurnNumber,
-            coins: nextCoins,
-            titleCount: nextUnlockedRun.length,
+            unlockedCount: nextUnlockedRun.length,
+            defeatedBossCount: bossPost.nextDefeatedBossIds.length,
             foundTruffle: nextFoundTruffle,
-            hp: nextHp,
           });
+          setRunTrufflePointsClaimed(true);
+          setLastRunTruffleReward(runEndBonusPoints);
+        }
+
+        setMetaProgression((prev) => ({
+          ...prev,
+          trufflePoints:
+            prev.trufflePoints + bossPost.trufflePointsEarned + runEndBonusPoints,
+          bestTurn: Math.max(prev.bestTurn, nextTurnNumber),
+          bestScore: Math.max(prev.bestScore, nextScore),
+          discoveredItems: Array.from(new Set([...prev.discoveredItems, ...newlyDiscovered])),
+          defeatedBossIds: Array.from(
+            new Set([...prev.defeatedBossIds, ...bossPost.nextDefeatedBossIds])
+          ),
+          reachedRegionIds: Array.from(
+            new Set([...prev.reachedRegionIds, bossPre.region.id])
+          ),
+          befriendedNpcIds: Array.from(
+            new Set([...prev.befriendedNpcIds, ...befriendedNow])
+          ),
+        }));
+
+        if (firebaseUser && firebaseUser.emailVerified) {
           const nextBestTitle =
             nextUnlockedRun.length > 0
               ? nextUnlockedRun[nextUnlockedRun.length - 1].title
@@ -1132,7 +1360,12 @@ export default function App() {
           fetchEpitaph(nextTurnNumber, nextCoins, nextInventory, cleanAction, dm.story);
         } else {
           setPhase('PLAYING');
-          if (newlyUnlocked.length > 0 || turnQuestEvent?.type === 'completed' || turnLevelUp) {
+          if (
+            newlyUnlocked.length > 0 ||
+            turnQuestEvent?.type === 'completed' ||
+            bossPost.bossEvent?.type === 'defeated' ||
+            turnLevelUp
+          ) {
             retroAudio.playAchievement();
           } else if (isStart) {
             retroAudio.playStart();
@@ -1167,6 +1400,11 @@ export default function App() {
       activeQuest,
       completedQuestIds,
       npcAffinities,
+      activeBoss,
+      defeatedBossIds,
+      activeBuffs,
+      legacyBonuses.xpMultiplier,
+      runTrufflePointsClaimed,
       firebaseUser,
       playerNickname,
       fetchEpitaph,
@@ -1190,7 +1428,18 @@ export default function App() {
     setActiveQuest(null);
     setCompletedQuestIds([]);
     setNpcAffinities(createInitialNpcAffinities());
+    setActiveBoss(null);
+    setDefeatedBossIds([]);
+    setActiveBuffs([]);
+    setRunTrufflePointsClaimed(false);
+    setLastRunTruffleReward(0);
     setCraftNotice(null);
+    setCookNotice(null);
+    setCookingFeedback(null);
+    if (cookingFeedbackTimerRef.current !== null) {
+      window.clearTimeout(cookingFeedbackTimerRef.current);
+      cookingFeedbackTimerRef.current = null;
+    }
     setEquipNotice(null);
     setSkillNotice(null);
     setErrorMsg(null);
@@ -1202,11 +1451,37 @@ export default function App() {
   const handleConfirmTalentAndStart = (talentId: TalentId) => {
     if (isLoading) return;
     const chosen = getTalentById(talentId);
+    const activeLegacy = calculateLegacyBonuses(metaProgression.legacyUpgrades);
+    const maxHp = INITIAL_STATS.maxHp + activeLegacy.maxHpBonus;
+    const maxHunger = INITIAL_STATS.maxHunger + activeLegacy.maxHungerBonus;
+    const startingHunger = Math.min(
+      maxHunger,
+      INITIAL_STATS.hunger + activeLegacy.startingHungerBonus
+    );
+    const startingInventory = activeLegacy.startingMainHand
+      ? ['半顆蘋果']
+      : [...INITIAL_STATS.inventory];
+
     const startingStats: PlayerStats = {
       ...INITIAL_STATS,
+      hp: maxHp,
+      maxHp,
+      hunger: startingHunger,
+      maxHunger,
+      coins: INITIAL_STATS.coins + activeLegacy.startingCoinsBonus,
+      inventory: startingInventory,
+      equipment: {
+        mainHand: activeLegacy.startingMainHand,
+        offHand: activeLegacy.startingOffHand,
+      },
+      skillPoints: activeLegacy.startingSkillPoints,
       talentId: chosen?.id ?? null,
       modifiers: chosen?.modifiers ?? DEFAULT_TALENT_MODIFIERS,
     };
+    setMetaProgression((prev) => ({
+      ...prev,
+      totalRuns: prev.totalRuns + 1,
+    }));
     retroAudio.playClick();
     setStats(startingStats);
     setMobileTab('adventure');
@@ -1235,14 +1510,32 @@ export default function App() {
     setActiveQuest(saved.activeQuest ?? null);
     setCompletedQuestIds(saved.completedQuestIds ?? []);
     setNpcAffinities(normalizeNpcAffinities(saved.npcAffinities));
+    setActiveBoss(saved.activeBoss ?? null);
+    setDefeatedBossIds(saved.defeatedBossIds ?? []);
+    setActiveBuffs(normalizeActiveFoodBuffs(saved.activeBuffs));
+    setRunTrufflePointsClaimed(Boolean(saved.runTrufflePointsClaimed));
+    setLastRunTruffleReward(saved.lastRunTruffleReward ?? 0);
     setCustomAction('');
     setErrorMsg(null);
     setLastFailedRequest(null);
     setCraftNotice(null);
+    setCookNotice(null);
+    setCookingFeedback(null);
+    if (cookingFeedbackTimerRef.current !== null) {
+      window.clearTimeout(cookingFeedbackTimerRef.current);
+      cookingFeedbackTimerRef.current = null;
+    }
     setEquipNotice(null);
     setSkillNotice(null);
     setMobileTab('adventure');
     setSceneSeed((s) => s + 1);
+  };
+
+  const handlePurchaseLegacyUpgrade = (upgradeId: LegacyUpgradeId) => {
+    const result = purchaseLegacyUpgrade(metaProgression, upgradeId);
+    if (!result.purchased) return;
+    retroAudio.playAchievement();
+    setMetaProgression(result.nextMeta);
   };
 
   const handleLearnSkill = (skillId: SkillId) => {
@@ -1363,6 +1656,40 @@ export default function App() {
     }
   };
 
+  const handleCookDish = (dish: AvailableCookingDish) => {
+    if (phase !== 'PLAYING' || isLoading) return;
+    const nextInventory = applyCooking(stats.inventory, dish);
+    if (!nextInventory) return;
+
+    retroAudio.playEat();
+    setStats((prev) => ({
+      ...prev,
+      inventory: nextInventory,
+    }));
+    setActiveBuffs((prev) => activateOrRefreshFoodBuff(prev, dish.recipe));
+    setMetaProgression((prev) => ({
+      ...prev,
+      discoveredItems: Array.from(new Set([...prev.discoveredItems, dish.recipe.dishName])),
+    }));
+    setCookNotice(
+      `小鍋滾燙出爐「${dish.recipe.dishName}」！獲得 ${dish.recipe.durationTurns} 回合增益：${dish.recipe.effectLabel}。`
+    );
+
+    if (cookingFeedbackTimerRef.current !== null) {
+      window.clearTimeout(cookingFeedbackTimerRef.current);
+    }
+    const burstKey = Date.now();
+    setCookingFeedback({
+      key: burstKey,
+      buffId: dish.recipe.id,
+      dishName: dish.recipe.dishName,
+    });
+    cookingFeedbackTimerRef.current = window.setTimeout(() => {
+      setCookingFeedback(null);
+      cookingFeedbackTimerRef.current = null;
+    }, 1250);
+  };
+
   const handleSubmitCustomAction = (e: React.FormEvent) => {
     e.preventDefault();
     if (phase !== 'PLAYING' || isLoading || !customAction.trim()) return;
@@ -1372,7 +1699,15 @@ export default function App() {
   // Keyboard shortcuts 1, 2, 3 for quick choices when not typing
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (isLeaderboardOpen || isSkillTreeOpen || phase !== 'PLAYING' || isLoading) return;
+      if (
+        isLeaderboardOpen ||
+        isSkillTreeOpen ||
+        compendiumModalState.open ||
+        phase !== 'PLAYING' ||
+        isLoading
+      ) {
+        return;
+      }
       const activeTag = document.activeElement?.tagName;
       if (activeTag === 'INPUT' || activeTag === 'TEXTAREA') return;
 
@@ -1386,7 +1721,15 @@ export default function App() {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [isLeaderboardOpen, isSkillTreeOpen, phase, isLoading, currentChoices, executeTurn]);
+  }, [
+    isLeaderboardOpen,
+    isSkillTreeOpen,
+    compendiumModalState.open,
+    phase,
+    isLoading,
+    currentChoices,
+    executeTurn,
+  ]);
 
   const hpPercent = Math.round((stats.hp / stats.maxHp) * 100);
   const hungerPercent = Math.round((stats.hunger / stats.maxHunger) * 100);
@@ -1790,6 +2133,19 @@ export default function App() {
               type="button"
               onClick={() => {
                 retroAudio.playClick();
+                setCompendiumModalState({ open: true, tab: 'legacy' });
+              }}
+              className="pixel-btn bg-[#33251c] hover:bg-[#443125] text-[#f3b562] px-3 py-1.5 text-xs sm:text-sm font-medium flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+              title="查看王國圖鑑與傳承祭壇強化"
+            >
+              <BookOpen className="w-4 h-4 text-[#f3b562]" />
+              <span className="font-num">圖鑑·傳承 ({metaProgression.trufflePoints})</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                retroAudio.playClick();
                 setIsLeaderboardOpen(true);
               }}
               className="pixel-btn bg-[#33251c] hover:bg-[#443125] text-[#ffd95a] px-3 py-1.5 text-xs sm:text-sm font-medium flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
@@ -1858,6 +2214,77 @@ export default function App() {
             />
           </div>
 
+          {/* Region Progress & Boss Card (Desktop left column + Mobile Adventure/Progress) */}
+          <div
+            className={`pixel-panel p-3.5 sm:p-4 flex-col gap-2.5 ${
+              mobileTab === 'adventure' || mobileTab === 'progress' ? 'flex' : 'hidden lg:flex'
+            }`}
+          >
+            <div className="flex items-center justify-between gap-2 border-b border-[#4a3525] pb-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <WorldMapIcon className="w-4 h-4 shrink-0" style={{ color: regionProgress.region.accentColor }} />
+                <div className="min-w-0">
+                  <div className="font-pixel text-xs sm:text-sm text-[#f5ebd9] truncate">
+                    {regionProgress.region.name}
+                  </div>
+                  <div className="text-[11px] text-[#b8a58d] truncate">
+                    {regionProgress.region.subtitle}
+                  </div>
+                </div>
+              </div>
+              <span className="font-num text-[11px] text-[#ffd95a] shrink-0">
+                頭目 {regionProgress.storyBossesDefeatedCount}/5
+              </span>
+            </div>
+
+            {activeBoss ? (
+              <div className="pixel-panel-inner border-[#e05a47] bg-[#2a1513] p-2.5 space-y-1.5">
+                <div className="flex items-center justify-between gap-2 text-xs">
+                  <span className="font-pixel text-[#ff9b8c] flex items-center gap-1.5 truncate">
+                    <Crown className="w-3.5 h-3.5 text-[#ffd95a] shrink-0" />
+                    <span className="truncate">{activeBoss.name}</span>
+                  </span>
+                  <span className="font-num font-bold text-[#ffd95a] shrink-0">
+                    {activeBoss.hp}/{activeBoss.maxHp}
+                  </span>
+                </div>
+                <div className="w-full h-2.5 bg-[#120d0a] border border-[#6e2f28] overflow-hidden">
+                  <div
+                    className="h-full bg-[#e05a47] transition-all duration-300"
+                    style={{
+                      width: `${Math.max(4, Math.round((activeBoss.hp / activeBoss.maxHp) * 100))}%`,
+                    }}
+                  />
+                </div>
+                <p className="text-[11px] text-[#e6d5b8] font-num">
+                  擊敗掉落：{activeBoss.rewardCoins} 幣 ＋「{activeBoss.rewardItem}」＋{activeBoss.trufflePointsReward} 松露點
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-1">
+                <div className="flex items-center justify-between text-[11px] text-[#cbb89e] font-num">
+                  <span>區域探索進度</span>
+                  <span>
+                    {turn === 0
+                      ? `第 ${regionProgress.nextMilestoneTurn} 回合遭遇 Boss`
+                      : regionProgress.turnsUntilBoss <= 0
+                      ? 'Boss 即將現身！'
+                      : `再 ${regionProgress.turnsUntilBoss} 回合遭遇「${regionProgress.region.boss.name}」`}
+                  </span>
+                </div>
+                <div className="w-full h-2 bg-[#120d0a] border border-[#4a3525] overflow-hidden">
+                  <div
+                    className="h-full transition-all duration-300"
+                    style={{
+                      width: `${regionProgress.progressPercent}%`,
+                      backgroundColor: regionProgress.region.accentColor,
+                    }}
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+
           <div
             className={`pixel-panel p-3.5 sm:p-4 flex-col gap-2.5 ${
               mobileTab === 'progress' ? 'flex' : 'hidden lg:flex'
@@ -1874,9 +2301,20 @@ export default function App() {
             </div>
             <ul className="text-xs text-[#cbb89e] space-y-1.5 leading-relaxed">
               <li>· 每次行動會消耗 5～10 點飽食度；若餓到歸零，小豬每回合將開始扣血。</li>
-              <li>· 遇到食物請別客氣，吃到美味料理能大幅恢復飽食度與精神。</li>
-              <li>· 善用背包道具與裝備欄，點擊道具可直接帶入行動框！</li>
+              <li>· 探索各區域將迎戰守關 Boss，擊破可獲得傳說神兵與「松露點數」。</li>
+              <li>· 善用背包道具、裝備欄與跨局「傳承祭壇」永久強化小豬！</li>
             </ul>
+            <button
+              type="button"
+              onClick={() => {
+                retroAudio.playClick();
+                setCompendiumModalState({ open: true, tab: 'legacy' });
+              }}
+              className="lg:hidden pixel-btn bg-[#33251c] hover:bg-[#443125] text-[#ffd95a] px-3 py-2 min-h-[44px] text-xs font-pixel flex items-center justify-center gap-2 cursor-pointer"
+            >
+              <BookOpen className="w-4 h-4" />
+              <span>開啟傳承祭壇與王國圖鑑（{metaProgression.trufflePoints} 點）</span>
+            </button>
           </div>
 
           {/* Adventure Skill Tree & Learned Passives Panel */}
@@ -2231,7 +2669,16 @@ export default function App() {
                     你是一隻勇敢、樂觀（而且非常容易肚子餓）的小豬冒險者。森林裡住著會說話的動物、脾氣古怪的哥布林廚師與大野狼強盜，而傳說中的「黃金黑松露」正等著你去發掘！
                   </p>
                 </div>
-                <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-center gap-2.5 w-full sm:w-auto">
+                <div className="pixel-panel-inner border-[#8f6a28] px-3.5 py-2 text-xs text-[#cbb89e] flex flex-wrap items-center justify-center gap-x-3 gap-y-1 font-num">
+                  <span className="text-[#ffd95a] font-bold">
+                    松露點數：{metaProgression.trufflePoints} 點
+                  </span>
+                  <span>·</span>
+                  <span>圖鑑收錄：{metaProgression.discoveredItems.length} 道具</span>
+                  <span>·</span>
+                  <span>稱號：{allUnlockedIds.length}/{HIDDEN_ACHIEVEMENTS.length}</span>
+                </div>
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-center gap-2.5 w-full sm:w-auto flex-wrap">
                   <button
                     type="button"
                     onClick={handleStartNewGame}
@@ -2251,6 +2698,17 @@ export default function App() {
                       <span>載入上次冒險</span>
                     </button>
                   )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      retroAudio.playClick();
+                      setCompendiumModalState({ open: true, tab: 'legacy' });
+                    }}
+                    className="pixel-btn bg-[#292210] hover:bg-[#3a2f15] border-[#d99b26] text-[#ffd95a] px-4 py-3 min-h-[44px] text-sm font-medium flex items-center justify-center gap-2 cursor-pointer"
+                  >
+                    <Flame className="w-4 h-4 text-[#ffd95a]" />
+                    <span>傳承祭壇 & 圖鑑</span>
+                  </button>
                 </div>
               </div>
             )}
@@ -2265,6 +2723,22 @@ export default function App() {
                   <p className="text-xs text-[#cbb89e]">
                     不同天賦會直接調整小豬在冒險中的數值係數，選擇後即刻召喚地下城主。
                   </p>
+                </div>
+
+                <div className="pixel-panel-inner border-[#8f6a28] px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-xs bg-[#21180f]">
+                  <span className="text-[#e6d5b8] font-num">
+                    傳承加成：HP +{legacyBonuses.maxHpBonus} · 飽食 +{legacyBonuses.maxHungerBonus} · 金幣 +{legacyBonuses.startingCoinsBonus} · 經驗 ×{legacyBonuses.xpMultiplier.toFixed(2)}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      retroAudio.playClick();
+                      setCompendiumModalState({ open: true, tab: 'legacy' });
+                    }}
+                    className="text-[#ffd95a] underline hover:text-[#ffe98f] font-medium cursor-pointer"
+                  >
+                    強化傳承 ({metaProgression.trufflePoints} 點)
+                  </button>
                 </div>
 
                 <div className="grid grid-cols-1 gap-2.5">
@@ -2505,6 +2979,41 @@ export default function App() {
                     </div>
                   )}
 
+                  {entry.bossEvent && (
+                    <div
+                      className={`px-3 py-2 border flex items-start gap-2.5 text-xs ${
+                        entry.bossEvent.type === 'defeated'
+                          ? 'bg-[#2a2110] border-[#ffd95a]'
+                          : 'bg-[#2a1513] border-[#e05a47]'
+                      }`}
+                    >
+                      <Crown className="w-4 h-4 text-[#ffd95a] shrink-0 mt-0.5" />
+                      <div className="min-w-0 space-y-0.5">
+                        <p className="font-pixel text-[#ffd95a]">
+                          {entry.bossEvent.type === 'defeated'
+                            ? `擊破守關 Boss「${entry.bossEvent.bossName}」！`
+                            : entry.bossEvent.type === 'spawned'
+                            ? `遭遇區域首領「${entry.bossEvent.bossName}」（${entry.bossEvent.bossTitle}）！`
+                            : `激戰「${entry.bossEvent.bossName}」`}
+                        </p>
+                        <p className="text-[#e6d5b8] font-num">
+                          造成 {entry.bossEvent.damageDealt} 點傷害
+                          {entry.bossEvent.isCrit ? '（暴擊！）' : ''} · Boss HP{' '}
+                          {entry.bossEvent.bossHpAfter}/{entry.bossEvent.bossMaxHp}
+                        </p>
+                        {entry.bossEvent.type === 'defeated' && (
+                          <p className="text-[#9fd67a] font-medium">
+                            獲得 +{entry.bossEvent.rewardCoins ?? 0} 豬豬幣、傳說戰利品「
+                            {entry.bossEvent.rewardItem}」、+{entry.bossEvent.trufflePointsEarned ?? 0} 松露點數！
+                            {entry.bossEvent.nextRegionName
+                              ? ` 已開啟新區域「${entry.bossEvent.nextRegionName}」！`
+                              : ''}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
                   <TypewriterText
                     text={entry.story}
                     animate={isLatest && !streamedEntryIdsRef.current.has(entry.id)}
@@ -2559,6 +3068,12 @@ export default function App() {
                         </span>
                       )}
                     </div>
+                  )}
+
+                  {entry.expiredBuffNames && entry.expiredBuffNames.length > 0 && (
+                    <p className="text-[11px] text-[#b8a58d] pt-1">
+                      料理飽暖效果消退：{entry.expiredBuffNames.join('、')}
+                    </p>
                   )}
 
                   {/* Hidden Achievement Unlock Record in Adventure Log */}
@@ -2670,7 +3185,23 @@ export default function App() {
                     獲得稱號：{runUnlocked.map((a) => `「${a.title}」`).join('、')}
                   </p>
                 )}
-                <div className="flex flex-wrap items-center justify-center gap-3">
+                {lastRunTruffleReward > 0 && (
+                  <div className="pixel-panel-inner border-[#d99b26] bg-[#21180f] px-3 py-2 text-xs text-[#ffd95a] font-num">
+                    本局結算獲得 <span className="font-bold">+{lastRunTruffleReward}</span> 松露點數！（累計可用：{metaProgression.trufflePoints} 點）
+                  </div>
+                )}
+                <div className="flex flex-wrap items-center justify-center gap-2.5 sm:gap-3">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      retroAudio.playClick();
+                      setCompendiumModalState({ open: true, tab: 'legacy' });
+                    }}
+                    className="pixel-btn bg-[#292210] hover:bg-[#3a2f15] border-[#d99b26] text-[#ffd95a] px-4 py-2.5 font-pixel text-sm flex items-center gap-2 cursor-pointer"
+                  >
+                    <Flame className="w-4 h-4" />
+                    <span>傳承祭壇強化</span>
+                  </button>
                   <button
                     type="button"
                     onClick={() => {
@@ -2680,7 +3211,7 @@ export default function App() {
                     className="pixel-btn bg-[#33251c] hover:bg-[#443125] text-[#ffd95a] px-4 py-2.5 font-pixel text-sm flex items-center gap-2 cursor-pointer"
                   >
                     <Trophy className="w-4 h-4" />
-                    <span>查看排行榜 / 登錄積分</span>
+                    <span>排行榜</span>
                   </button>
                   <button
                     type="button"
@@ -2721,6 +3252,55 @@ export default function App() {
                       <span>委託道具已齊全，點此交付 →</span>
                     </button>
                   )}
+                </div>
+              )}
+
+              {activeBoss && (
+                <div className="pixel-panel-inner border-[#e05a47] bg-[#2a1513] px-3 py-2 flex flex-wrap items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="text-xs font-pixel text-[#ffd95a] flex items-center gap-1.5 truncate">
+                      <Crown className="w-3.5 h-3.5 shrink-0" />
+                      <span className="truncate">
+                        Boss 戰：{activeBoss.name}（HP {activeBoss.hp}/{activeBoss.maxHp}）
+                      </span>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={isLoading}
+                    onClick={() =>
+                      executeTurn(
+                        false,
+                        `全力揮舞${stats.equipment.mainHand ?? '豬蹄'}猛攻 ${activeBoss.name}`
+                      )
+                    }
+                    className="pixel-btn bg-[#8f2d22] hover:bg-[#a8382b] text-[#fff2ef] px-3 py-1.5 min-h-[36px] text-xs font-bold flex items-center gap-1.5 shrink-0 cursor-pointer disabled:opacity-50"
+                  >
+                    <Swords className="w-3.5 h-3.5" />
+                    <span>全力突擊 Boss</span>
+                  </button>
+                </div>
+              )}
+
+              {activeBuffs.length > 0 && (
+                <div className="pixel-panel-inner border-[#8f6a28] bg-[#21180f] px-2.5 py-1.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-[11px]">
+                  <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[#ffd95a] min-w-0">
+                    <span className="flex items-center gap-1 font-medium shrink-0">
+                      <Soup className="w-3.5 h-3.5 text-[#f3b562]" />
+                      <span>料理增益：</span>
+                    </span>
+                    {activeBuffs.map((buff) => (
+                      <span key={buff.id} className="font-num text-[#e6d5b8]">
+                        {buff.dishName}
+                        <span className="text-[#9fd67a]">({buff.remainingTurns}T)</span>
+                      </span>
+                    ))}
+                  </div>
+                  <span className="text-[10px] text-[#b8a58d] font-num truncate">
+                    {foodBuffMods.ignoreNightExtraDrain ? '免疫夜晚扣飽食 ' : ''}
+                    {foodBuffMods.attackBonus > 0 ? `攻+${foodBuffMods.attackBonus} ` : ''}
+                    {foodBuffMods.regenHpPerTurn > 0 ? `每回+${foodBuffMods.regenHpPerTurn}HP` : ''}
+                  </span>
                 </div>
               )}
 
@@ -2972,6 +3552,174 @@ export default function App() {
             )}
           </div>
 
+          {/* Camp Cooking Pot & Multi-Turn Dish Buffs Panel */}
+          <div
+            className={`pixel-panel p-3.5 sm:p-4 flex-col gap-3 relative ${
+              cookingFeedback ? 'cook-pot-flash' : ''
+            } ${mobileTab === 'bag' ? 'flex' : 'hidden lg:flex'}`}
+          >
+            <div className="flex items-center justify-between border-b-2 border-[#4a3525] pb-2.5">
+              <div className="flex items-center gap-2">
+                <div className="relative inline-flex items-center justify-center">
+                  <Soup
+                    key={cookingFeedback ? `pot-icon-${cookingFeedback.key}` : 'pot-icon-idle'}
+                    className={`w-4 h-4 ${
+                      cookingFeedback
+                        ? 'text-[#ffd95a] cook-pot-icon-bounce'
+                        : 'text-[#f59d56]'
+                    }`}
+                  />
+                  {cookingFeedback && (
+                    <div
+                      key={`sparks-${cookingFeedback.key}`}
+                      aria-hidden="true"
+                      className="pointer-events-none absolute -inset-2 overflow-visible"
+                    >
+                      <span
+                        className="cook-spark-particle absolute left-0 top-0 text-[10px] font-bold text-[#ffd95a]"
+                        style={{ '--spark-x': '-8px', animationDelay: '0ms' } as React.CSSProperties}
+                      >
+                        ✦
+                      </span>
+                      <span
+                        className="cook-spark-particle absolute left-2 -top-1 text-[11px] font-bold text-[#f59d56]"
+                        style={{ '--spark-x': '2px', animationDelay: '70ms' } as React.CSSProperties}
+                      >
+                        ♨
+                      </span>
+                      <span
+                        className="cook-spark-particle absolute right-0 top-0 text-[10px] font-bold text-[#fff2a6]"
+                        style={{ '--spark-x': '9px', animationDelay: '130ms' } as React.CSSProperties}
+                      >
+                        ★
+                      </span>
+                      <span
+                        className="cook-spark-particle absolute left-1 top-1 text-[9px] font-bold text-[#9fd67a]"
+                        style={{ '--spark-x': '-5px', animationDelay: '180ms' } as React.CSSProperties}
+                      >
+                        •
+                      </span>
+                      <span
+                        className="cook-spark-particle absolute right-1 top-1 text-[10px] font-bold text-[#ffd95a]"
+                        style={{ '--spark-x': '6px', animationDelay: '230ms' } as React.CSSProperties}
+                      >
+                        ✦
+                      </span>
+                    </div>
+                  )}
+                </div>
+                <h2 className="font-pixel text-base text-[#f5ebd9]">營地小鍋子</h2>
+              </div>
+              {cookingFeedback ? (
+                <span className="font-pixel text-xs text-[#ffd95a] flex items-center gap-1">
+                  <Flame className="w-3.5 h-3.5 text-[#f59d56]" />
+                  <span>料理出爐！</span>
+                </span>
+              ) : (
+                <span className="font-num text-xs text-[#9fd67a]">
+                  {activeBuffs.length > 0 ? `生效中 ${activeBuffs.length} 道` : '燉煮回合 Buff'}
+                </span>
+              )}
+            </div>
+
+            {cookNotice && (
+              <div
+                key={cookingFeedback ? `notice-${cookingFeedback.key}` : 'notice-static'}
+                className={`pixel-panel-inner border-[#d99b26] bg-[#261d12] px-3 py-2 text-xs text-[#ffd95a] leading-relaxed ${
+                  cookingFeedback ? 'cook-notice-pop' : ''
+                }`}
+              >
+                {cookNotice}
+              </div>
+            )}
+
+            {activeBuffs.length > 0 && (
+              <div className="space-y-1.5">
+                <div className="text-[11px] font-medium text-[#cbb89e]">生效中的料理增益</div>
+                {activeBuffs.map((buff) => {
+                  const isFreshlyCooked = cookingFeedback?.buffId === buff.id;
+                  return (
+                    <div
+                      key={buff.id}
+                      className={`pixel-panel-inner p-2.5 space-y-1 transition-colors duration-300 ${
+                        isFreshlyCooked
+                          ? 'border-[#ffd95a] bg-[#302210]'
+                          : 'border-[#8f6a28] bg-[#21180f]'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2 text-xs">
+                        <span className="font-pixel text-[#ffd95a] truncate">{buff.dishName}</span>
+                        <span className="font-num text-[#9fd67a] font-bold shrink-0">
+                          剩 {buff.remainingTurns} 回合
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-[#e6d5b8] font-num">{buff.effectLabel}</p>
+                      <div className="w-full h-1.5 bg-[#120d0a] border border-[#4a3525] overflow-hidden">
+                        <div
+                          className={`h-full transition-all duration-300 ${
+                            isFreshlyCooked ? 'bg-[#ffd95a]' : 'bg-[#f59d56]'
+                          }`}
+                          style={{
+                            width: `${Math.max(10, Math.round((buff.remainingTurns / buff.maxTurns) * 100))}%`,
+                          }}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {phase === 'PLAYING' && availableCookingDishes.length > 0 ? (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-[11px] text-[#cbb89e]">
+                  <span className="flex items-center gap-1 text-[#ffd95a] font-medium">
+                    <Utensils className="w-3.5 h-3.5 shrink-0" />
+                    <span>可下鍋燉煮料理（清背包＋強效 Buff）</span>
+                  </span>
+                  <span className="font-num">{availableCookingDishes.length} 道</span>
+                </div>
+                <div className="space-y-1.5">
+                  {availableCookingDishes.map((dish) => (
+                    <div
+                      key={dish.recipe.id}
+                      className="pixel-panel-inner p-2.5 flex items-center justify-between gap-2"
+                    >
+                      <div className="min-w-0 flex-1 space-y-0.5">
+                        <div className="flex items-center gap-1.5 text-xs">
+                          <span className="font-pixel text-[#ffd95a] truncate">
+                            {dish.recipe.dishName}
+                          </span>
+                          <span className="font-num text-[11px] text-[#9fd67a] shrink-0">
+                            {dish.recipe.durationTurns}T
+                          </span>
+                        </div>
+                        <div className="text-[11px] text-[#cbb89e] truncate">
+                          食材：{dish.itemA} ＋ {dish.itemB}
+                        </div>
+                        <div className="text-[11px] text-[#8ef0a4] font-num truncate">
+                          {dish.recipe.effectLabel}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={isLoading}
+                        onClick={() => handleCookDish(dish)}
+                        className="pixel-btn pixel-btn-primary px-2.5 py-2 min-h-[40px] text-xs font-bold whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+                      >
+                        開火烹煮
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <div className="pixel-panel-inner p-3 text-xs text-[#9c8a74] leading-relaxed">
+                收集 2 樣食材（如香菇、泉水、烤橡果、蘋果、培根或松露碎片）即可在營地小鍋子燉煮持續 4～5 回合的強力增益料理，同時騰出背包空間！
+              </div>
+            )}
+          </div>
+
           <div
             className={`pixel-panel p-3.5 sm:p-4 flex-col gap-3 ${
               mobileTab === 'bag' ? 'flex' : 'hidden lg:flex'
@@ -3206,7 +3954,7 @@ export default function App() {
             <Backpack className="w-5 h-5" />
             <span className="whitespace-nowrap font-num">
               背包·{stats.inventory.length}
-              {availableCrafts.length > 0 ? '★' : ''}
+              {availableCrafts.length + availableCookingDishes.length > 0 ? '★' : ''}
             </span>
           </button>
 
@@ -3276,6 +4024,15 @@ export default function App() {
         canSpendPoints={phase === 'PLAYING' && !isLoading}
         onLearnSkill={handleLearnSkill}
         onLearnMastery={handleLearnMastery}
+      />
+      <CompendiumModal
+        isOpen={compendiumModalState.open}
+        initialTab={compendiumModalState.tab}
+        onClose={() => setCompendiumModalState((prev) => ({ ...prev, open: false }))}
+        meta={metaProgression}
+        allUnlockedAchievementIds={allUnlockedIds}
+        isInActiveRun={phase === 'PLAYING'}
+        onPurchaseUpgrade={handlePurchaseLegacyUpgrade}
       />
       <OfflineIndicator />
     </div>
