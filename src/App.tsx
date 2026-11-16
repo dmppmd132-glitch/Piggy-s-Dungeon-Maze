@@ -69,6 +69,7 @@ import {
   activateOrRefreshFoodBuff,
   applyCooking,
   calculateFoodBuffModifiers,
+  COOKING_RECIPES,
   findAvailableCookingRecipes,
   normalizeActiveFoodBuffs,
   tickFoodBuffs,
@@ -105,7 +106,7 @@ import {
   unequipSlot,
 } from './utils/equipment';
 import { SkillTreeModal } from './components/SkillTreeModal';
-import { CompendiumModal } from './components/CompendiumModal';
+import { CompendiumModal, type CompendiumTab } from './components/CompendiumModal';
 import {
   advanceLevelAndXp,
   calculateSkillModifiers,
@@ -371,7 +372,7 @@ export default function App() {
   );
   const [compendiumModalState, setCompendiumModalState] = useState<{
     open: boolean;
-    tab: 'legacy' | 'compendium';
+    tab: CompendiumTab;
   }>({ open: false, tab: 'legacy' });
 
   const handleNicknameChange = useCallback((name: string) => {
@@ -1670,6 +1671,10 @@ export default function App() {
     setMetaProgression((prev) => ({
       ...prev,
       discoveredItems: Array.from(new Set([...prev.discoveredItems, dish.recipe.dishName])),
+      cookedRecipeCounts: {
+        ...(prev.cookedRecipeCounts ?? {}),
+        [dish.recipe.id]: ((prev.cookedRecipeCounts ?? {})[dish.recipe.id] ?? 0) + 1,
+      },
     }));
     setCookNotice(
       `小鍋滾燙出爐「${dish.recipe.dishName}」！獲得 ${dish.recipe.durationTurns} 回合增益：${dish.recipe.effectLabel}。`
@@ -3283,24 +3288,64 @@ export default function App() {
               )}
 
               {activeBuffs.length > 0 && (
-                <div className="pixel-panel-inner border-[#8f6a28] bg-[#21180f] px-2.5 py-1.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-[11px]">
-                  <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[#ffd95a] min-w-0">
-                    <span className="flex items-center gap-1 font-medium shrink-0">
+                <div className="pixel-panel-inner border-[#8f6a28] bg-[#21180f] px-2.5 py-2 space-y-1.5 text-[11px]">
+                  <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5">
+                    <span className="flex items-center gap-1 font-medium text-[#ffd95a] shrink-0">
                       <Soup className="w-3.5 h-3.5 text-[#f3b562]" />
-                      <span>料理增益：</span>
+                      <span>料理增益倒數</span>
                     </span>
-                    {activeBuffs.map((buff) => (
-                      <span key={buff.id} className="font-num text-[#e6d5b8]">
-                        {buff.dishName}
-                        <span className="text-[#9fd67a]">({buff.remainingTurns}T)</span>
-                      </span>
-                    ))}
+                    <span className="text-[10px] text-[#b8a58d] font-num truncate">
+                      {foodBuffMods.ignoreNightExtraDrain ? '免疫夜晚扣飽食 ' : ''}
+                      {foodBuffMods.attackBonus > 0 ? `攻+${foodBuffMods.attackBonus} ` : ''}
+                      {foodBuffMods.regenHpPerTurn > 0 ? `每回+${foodBuffMods.regenHpPerTurn}HP` : ''}
+                    </span>
                   </div>
-                  <span className="text-[10px] text-[#b8a58d] font-num truncate">
-                    {foodBuffMods.ignoreNightExtraDrain ? '免疫夜晚扣飽食 ' : ''}
-                    {foodBuffMods.attackBonus > 0 ? `攻+${foodBuffMods.attackBonus} ` : ''}
-                    {foodBuffMods.regenHpPerTurn > 0 ? `每回+${foodBuffMods.regenHpPerTurn}HP` : ''}
-                  </span>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                    {activeBuffs.map((buff) => {
+                      const isExpiring = buff.remainingTurns === 1;
+                      const percent = Math.max(
+                        8,
+                        Math.min(100, Math.round((buff.remainingTurns / buff.maxTurns) * 100))
+                      );
+                      return (
+                        <div
+                          key={buff.id}
+                          className={`border px-2 py-1 space-y-1 ${
+                            isExpiring
+                              ? 'buff-expiring-blink border-[#ff7b6b]'
+                              : 'border-[#4a3525] bg-[#17110d]'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-2 text-[11px]">
+                            <span
+                              className={`font-medium truncate ${
+                                isExpiring ? 'text-[#ffd95a]' : 'text-[#e6d5b8]'
+                              }`}
+                            >
+                              {buff.dishName}
+                            </span>
+                            <span
+                              className={`font-num font-bold shrink-0 ${
+                                isExpiring ? 'text-[#ff9b8c]' : 'text-[#9fd67a]'
+                              }`}
+                            >
+                              {isExpiring
+                                ? '剩 1T · 即將結束！'
+                                : `${buff.remainingTurns}/${buff.maxTurns}T`}
+                            </span>
+                          </div>
+                          <div className="w-full h-1.5 bg-[#120d0a] border border-[#3c2b1e] overflow-hidden">
+                            <div
+                              className={`h-full transition-all duration-300 ${
+                                isExpiring ? 'bg-[#ff7b6b]' : 'bg-[#f59d56]'
+                              }`}
+                              style={{ width: `${percent}%` }}
+                            />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
               )}
 
@@ -3616,9 +3661,30 @@ export default function App() {
                   <span>料理出爐！</span>
                 </span>
               ) : (
-                <span className="font-num text-xs text-[#9fd67a]">
-                  {activeBuffs.length > 0 ? `生效中 ${activeBuffs.length} 道` : '燉煮回合 Buff'}
-                </span>
+                <div className="flex items-center gap-2 shrink-0">
+                  <span className="font-num text-xs text-[#9fd67a]">
+                    {activeBuffs.length > 0 ? `生效中 ${activeBuffs.length} 道` : '燉煮回合 Buff'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      retroAudio.playClick();
+                      setCompendiumModalState({ open: true, tab: 'cookbook' });
+                    }}
+                    className="pixel-btn bg-[#33251c] hover:bg-[#473326] text-[#ffd95a] px-2 py-1 text-[11px] font-num cursor-pointer"
+                    title="開啟料理手冊查看已烹飪菜譜與小豬食評"
+                  >
+                    手冊{' '}
+                    {
+                      COOKING_RECIPES.filter(
+                        (r) =>
+                          ((metaProgression.cookedRecipeCounts ?? {})[r.id] ?? 0) > 0 ||
+                          metaProgression.discoveredItems.includes(r.dishName)
+                      ).length
+                    }
+                    /{COOKING_RECIPES.length}
+                  </button>
+                </div>
               )}
             </div>
 
@@ -3638,29 +3704,46 @@ export default function App() {
                 <div className="text-[11px] font-medium text-[#cbb89e]">生效中的料理增益</div>
                 {activeBuffs.map((buff) => {
                   const isFreshlyCooked = cookingFeedback?.buffId === buff.id;
+                  const isExpiring = buff.remainingTurns === 1;
+                  const percent = Math.max(
+                    8,
+                    Math.min(100, Math.round((buff.remainingTurns / buff.maxTurns) * 100))
+                  );
                   return (
                     <div
                       key={buff.id}
                       className={`pixel-panel-inner p-2.5 space-y-1 transition-colors duration-300 ${
                         isFreshlyCooked
                           ? 'border-[#ffd95a] bg-[#302210]'
+                          : isExpiring
+                          ? 'buff-expiring-blink border-[#ff7b6b]'
                           : 'border-[#8f6a28] bg-[#21180f]'
                       }`}
                     >
                       <div className="flex items-center justify-between gap-2 text-xs">
                         <span className="font-pixel text-[#ffd95a] truncate">{buff.dishName}</span>
-                        <span className="font-num text-[#9fd67a] font-bold shrink-0">
-                          剩 {buff.remainingTurns} 回合
+                        <span
+                          className={`font-num font-bold shrink-0 ${
+                            isExpiring ? 'text-[#ff9b8c]' : 'text-[#9fd67a]'
+                          }`}
+                        >
+                          {isExpiring
+                            ? '剩 1 回合（即將結束！）'
+                            : `剩 ${buff.remainingTurns}/${buff.maxTurns} 回合`}
                         </span>
                       </div>
                       <p className="text-[11px] text-[#e6d5b8] font-num">{buff.effectLabel}</p>
                       <div className="w-full h-1.5 bg-[#120d0a] border border-[#4a3525] overflow-hidden">
                         <div
                           className={`h-full transition-all duration-300 ${
-                            isFreshlyCooked ? 'bg-[#ffd95a]' : 'bg-[#f59d56]'
+                            isFreshlyCooked
+                              ? 'bg-[#ffd95a]'
+                              : isExpiring
+                              ? 'bg-[#ff7b6b]'
+                              : 'bg-[#f59d56]'
                           }`}
                           style={{
-                            width: `${Math.max(10, Math.round((buff.remainingTurns / buff.maxTurns) * 100))}%`,
+                            width: `${percent}%`,
                           }}
                         />
                       </div>

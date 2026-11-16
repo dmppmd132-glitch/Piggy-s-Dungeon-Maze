@@ -1,10 +1,12 @@
 import type {
+  FoodBuffId,
   LegacyUpgradeId,
   LegacyUpgradesMap,
   MetaProgressionState,
   NpcId,
   RegionId,
 } from '../types/game';
+import { COOKING_RECIPES } from './cooking';
 
 const META_STORAGE_KEY = 'mud_kingdom_meta_v1';
 
@@ -117,6 +119,7 @@ export function createDefaultMetaProgression(): MetaProgressionState {
     defeatedBossIds: [],
     reachedRegionIds: ['mud_village'],
     befriendedNpcIds: [],
+    cookedRecipeCounts: {},
   };
 }
 
@@ -136,6 +139,30 @@ export function normalizeMetaProgression(
     }
   }
 
+  const discoveredItems = Array.isArray(raw.discoveredItems)
+    ? Array.from(
+        new Set(
+          raw.discoveredItems.filter(
+            (x): x is string => typeof x === 'string' && x.trim().length > 0
+          )
+        )
+      )
+    : base.discoveredItems;
+
+  const cookedRecipeCounts: Partial<Record<FoodBuffId, number>> = {};
+  const rawCooked =
+    raw.cookedRecipeCounts && typeof raw.cookedRecipeCounts === 'object'
+      ? (raw.cookedRecipeCounts as Record<string, unknown>)
+      : {};
+  for (const recipe of COOKING_RECIPES) {
+    const val = rawCooked[recipe.id];
+    if (typeof val === 'number' && Number.isFinite(val) && val > 0) {
+      cookedRecipeCounts[recipe.id] = Math.floor(val);
+    } else if (discoveredItems.includes(recipe.dishName)) {
+      cookedRecipeCounts[recipe.id] = 1;
+    }
+  }
+
   return {
     trufflePoints:
       typeof raw.trufflePoints === 'number' && raw.trufflePoints >= 0
@@ -150,9 +177,7 @@ export function normalizeMetaProgression(
     bestScore:
       typeof raw.bestScore === 'number' && raw.bestScore >= 0 ? Math.floor(raw.bestScore) : 0,
     legacyUpgrades: upgrades,
-    discoveredItems: Array.isArray(raw.discoveredItems)
-      ? Array.from(new Set(raw.discoveredItems.filter((x): x is string => typeof x === 'string' && x.trim().length > 0)))
-      : base.discoveredItems,
+    discoveredItems,
     defeatedBossIds: Array.isArray(raw.defeatedBossIds)
       ? Array.from(new Set(raw.defeatedBossIds.filter((x): x is string => typeof x === 'string')))
       : [],
@@ -162,6 +187,7 @@ export function normalizeMetaProgression(
     befriendedNpcIds: Array.isArray(raw.befriendedNpcIds)
       ? Array.from(new Set(raw.befriendedNpcIds as NpcId[]))
       : [],
+    cookedRecipeCounts,
   };
 }
 

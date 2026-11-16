@@ -216,6 +216,8 @@ export type LegacyUpgradeId =
 
 export type LegacyUpgradesMap = Record<LegacyUpgradeId, number>;
 
+export type FoodBuffId = 'warm_soup' | 'spicy_roast' | 'herbal_tea' | 'truffle_bisque';
+
 export interface MetaProgressionState {
   trufflePoints: number;
   totalRuns: number;
@@ -226,9 +228,8 @@ export interface MetaProgressionState {
   defeatedBossIds: string[];
   reachedRegionIds: RegionId[];
   befriendedNpcIds: NpcId[];
+  cookedRecipeCounts?: Partial<Record<FoodBuffId, number>>;
 }
-
-export type FoodBuffId = 'warm_soup' | 'spicy_roast' | 'herbal_tea' | 'truffle_bisque';
 
 export interface ActiveFoodBuff {
   id: FoodBuffId;

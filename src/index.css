@@ -120,7 +120,8 @@
   .cook-pot-flash,
   .cook-pot-icon-bounce,
   .cook-spark-particle,
-  .cook-notice-pop {
+  .cook-notice-pop,
+  .buff-expiring-blink {
     animation: none !important;
   }
 }
@@ -315,6 +316,19 @@
   animation: achievementTrophyBounce 1.15s cubic-bezier(0.22, 1, 0.36, 1) forwards;
 }
 
+@keyframes buffExpiringBlink {
+  0%, 100% {
+    border-color: #ff7b6b;
+    background-color: #2b1613;
+    box-shadow: 0 0 8px 0 rgba(255, 123, 107, 0.35);
+  }
+  50% {
+    border-color: #ffd95a;
+    background-color: #3a2115;
+    box-shadow: 0 0 12px 1px rgba(255, 217, 90, 0.4);
+  }
+}
+
 .cook-pot-flash {
   animation: cookPotSizzle 1.2s steps(6, end) forwards;
 }
@@ -329,4 +343,8 @@
 
 .cook-notice-pop {
   animation: cookNoticePop 0.65s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+.buff-expiring-blink {
+  animation: buffExpiringBlink 1.1s steps(2, end) infinite;
 }

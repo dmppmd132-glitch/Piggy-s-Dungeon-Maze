@@ -6,6 +6,9 @@ export interface CookingRecipeDefinition {
   durationTurns: number;
   effectLabel: string;
   description: string;
+  ingredientHint: string;
+  piggyRating: string;
+  piggyReview: string;
   keywordsA: string[];
   excludeA?: string[];
   keywordsB: string[];
@@ -68,6 +71,10 @@ export const COOKING_RECIPES: CookingRecipeDefinition[] = [
     durationTurns: 5,
     effectLabel: '豬豬幣 +30% · 攻擊 +3 · 每回合 +2 HP',
     description: '以珍貴松露碎片慢火熬煮的頂級濃湯，讓小豬精力充沛又財氣滿滿。',
+    ingredientHint: '松露碎片 ＋ 香菇／泉水／起司／培根／蘋果',
+    piggyRating: '★★★★★ 鎮村神湯',
+    piggyReview:
+      '「呼嚕呼嚕！一入口就像整座松露森林在嘴裡開派對，連鍋底都被我用豬鼻子舔得比白銀湯匙還亮！」',
     keywordsA: ['松露'],
     excludeA: ['黃金黑松露'],
     keywordsB: [
@@ -99,6 +106,10 @@ export const COOKING_RECIPES: CookingRecipeDefinition[] = [
     durationTurns: 4,
     effectLabel: '攻擊 +4 · 受傷再減免 15%',
     description: '香辣焦脆的烤肉配上山林野菇，吃完瞬間熱血沸騰、皮糙肉厚。',
+    ingredientHint: '培根／肉類 ＋ 野菇／香料／橡果／蘋果／麵包',
+    piggyRating: '★★★★★ 戰神烤串',
+    piggyReview:
+      '「嘶哈——好辣好香！吃完覺得自己能直接一頭撞飛大野狼，下次記得再多配半口森林泉水！」',
     keywordsA: ['肉', '培根', '火腿', '香腸', '排骨', '雞腿', '香煎森林野菇'],
     keywordsB: ['香菇', '野菇', '蘑菇', '辣椒', '香料', '鹽', '蒜', '橡果', '蘋果', '麵包'],
     attackBonus: 4,
@@ -110,6 +121,10 @@ export const COOKING_RECIPES: CookingRecipeDefinition[] = [
     durationTurns: 5,
     effectLabel: '每回合回 +3 HP · 尋物機率 +12%',
     description: '清甜甘冽的森林泉水與果香藥草交織，喝完鼻子特別靈敏。',
+    ingredientHint: '泉水／草藥／藥水 ＋ 蘋果／橡果／鬆餅／草藥',
+    piggyRating: '★★★★☆ 嗅覺特調',
+    piggyReview:
+      '「清甜又回甘～喝完整隻豬都輕飄飄的，連埋在泥土三尺深的松露味道都逃不過我的鼻子！」',
     keywordsA: ['泉水', '清泉', '山泉', '活力泉水', '治療藥水', '果酒', '草藥', '藥草', '薄荷', '花茶'],
     keywordsB: ['蘋果', '橡果', '鬆餅', '草藥', '藥草', '薄荷', '蜂蜜', '漿果', '野果', '花'],
     regenHpPerTurn: 3,
@@ -121,6 +136,10 @@ export const COOKING_RECIPES: CookingRecipeDefinition[] = [
     durationTurns: 4,
     effectLabel: '免疫夜晚/冬夏額外扣飽食 · 省糧 +2',
     description: '熱呼呼的農村雜糧濃湯，寒夜與長途跋涉時最能替小豬護住胃袋。',
+    ingredientHint: '任意兩種常見食材（野菇／橡果／蘋果／泉水／麵包）',
+    piggyRating: '★★★★☆ 暖心宵夜',
+    piggyReview:
+      '「雖然看起來像大雜燴，但半夜在黑漆漆的森林裡喝上一口，肚皮暖呼呼的就不怕半夜餓醒啦！」',
     keywordsA: [
       '香菇',
       '野菇',

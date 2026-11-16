@@ -9,6 +9,7 @@ import {
   Lock,
   Map,
   Package,
+  Soup,
   Sparkles,
   X,
 } from 'lucide-react';
@@ -22,10 +23,14 @@ import { ENDLESS_ABYSS_REGION, WORLD_REGIONS } from '../utils/regions';
 import { MUD_KINGDOM_NPCS } from '../utils/npcAffinity';
 import { HIDDEN_ACHIEVEMENTS } from '../utils/achievements';
 import { getItemEquipmentProfile } from '../utils/equipment';
+import { COOKING_RECIPES } from '../utils/cooking';
+import { PigPortrait } from './PixelSprites';
+
+export type CompendiumTab = 'legacy' | 'compendium' | 'cookbook';
 
 interface CompendiumModalProps {
   isOpen: boolean;
-  initialTab?: 'legacy' | 'compendium';
+  initialTab?: CompendiumTab;
   onClose: () => void;
   meta: MetaProgressionState;
   allUnlockedAchievementIds: string[];
@@ -42,7 +47,7 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
   isInActiveRun,
   onPurchaseUpgrade,
 }) => {
-  const [activeTab, setActiveTab] = useState<'legacy' | 'compendium'>(initialTab);
+  const [activeTab, setActiveTab] = useState<CompendiumTab>(initialTab);
 
   React.useEffect(() => {
     if (isOpen) {
@@ -57,6 +62,14 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
   const defeatedStoryCount = WORLD_REGIONS.filter((r) =>
     meta.defeatedBossIds.includes(r.boss.id)
   ).length;
+  const cookedCounts = meta.cookedRecipeCounts ?? {};
+  const unlockedRecipeCount = COOKING_RECIPES.filter(
+    (r) => (cookedCounts[r.id] ?? 0) > 0 || meta.discoveredItems.includes(r.dishName)
+  ).length;
+  const totalCookedDishes = COOKING_RECIPES.reduce((sum, r) => {
+    const count = cookedCounts[r.id] ?? (meta.discoveredItems.includes(r.dishName) ? 1 : 0);
+    return sum + count;
+  }, 0);
 
   return (
     <div
@@ -95,11 +108,11 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
         </div>
 
         {/* Interactive Tab Switcher */}
-        <div className="px-3.5 sm:px-4 pt-2.5 pb-2 border-b border-[#3c2b1e] bg-[#19120e] flex items-center gap-2">
+        <div className="px-3.5 sm:px-4 pt-2.5 pb-2 border-b border-[#3c2b1e] bg-[#19120e] flex items-center gap-2 overflow-x-auto rpg-scroll">
           <button
             type="button"
             onClick={() => setActiveTab('legacy')}
-            className={`pixel-btn px-3.5 py-2 min-h-[40px] text-xs font-pixel flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer ${
+            className={`pixel-btn px-3 sm:px-3.5 py-2 min-h-[40px] text-xs font-pixel flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer ${
               activeTab === 'legacy'
                 ? 'pixel-btn-primary'
                 : 'bg-[#2a1e16] text-[#cbb89e] hover:text-[#f5ebd9]'
@@ -111,7 +124,7 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
           <button
             type="button"
             onClick={() => setActiveTab('compendium')}
-            className={`pixel-btn px-3.5 py-2 min-h-[40px] text-xs font-pixel flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer ${
+            className={`pixel-btn px-3 sm:px-3.5 py-2 min-h-[40px] text-xs font-pixel flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer ${
               activeTab === 'compendium'
                 ? 'pixel-btn-primary'
                 : 'bg-[#2a1e16] text-[#cbb89e] hover:text-[#f5ebd9]'
@@ -119,6 +132,20 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
           >
             <BookOpen className="w-3.5 h-3.5" />
             <span>王國圖鑑</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('cookbook')}
+            className={`pixel-btn px-3 sm:px-3.5 py-2 min-h-[40px] text-xs font-pixel flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer ${
+              activeTab === 'cookbook'
+                ? 'pixel-btn-primary'
+                : 'bg-[#2a1e16] text-[#cbb89e] hover:text-[#f5ebd9]'
+            }`}
+          >
+            <Soup className="w-3.5 h-3.5" />
+            <span>
+              料理手冊（{unlockedRecipeCount}/{COOKING_RECIPES.length}）
+            </span>
           </button>
         </div>
 
@@ -219,7 +246,7 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
                 })}
               </div>
             </>
-          ) : (
+          ) : activeTab === 'compendium' ? (
             <>
               {/* 1. Regions & Bosses Compendium */}
               <div className="space-y-2.5">
@@ -376,6 +403,120 @@ export const CompendiumModal: React.FC<CompendiumModalProps> = ({
                     <span className="font-num font-bold text-[#9fd67a]">+8 松露點數</span>！
                   </p>
                 </div>
+              </div>
+            </>
+          ) : (
+            <>
+              {/* Cookbook Summary Header */}
+              <div className="pixel-panel-inner border-[#d99b26] p-3 space-y-1.5 bg-[#21180f]">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                  <span className="font-pixel text-[#ffd95a] flex items-center gap-1.5">
+                    <Soup className="w-4 h-4 text-[#f59d56] shrink-0" />
+                    <span>貪吃小豬的營地料理手冊</span>
+                  </span>
+                  <span className="font-num text-[#9fd67a] font-bold">
+                    已解鎖 {unlockedRecipeCount}/{COOKING_RECIPES.length} 道 · 累計烹飪 {totalCookedDishes} 次
+                  </span>
+                </div>
+                <p className="text-[11px] text-[#cbb89e] leading-relaxed">
+                  只要在冒險中的「營地小鍋子」親手烹煮過該道料理，就會永久收錄於料理手冊，記錄完整回合增益效果與小豬的真實試吃食評！
+                </p>
+              </div>
+
+              {/* Cookbook Recipe Cards */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {COOKING_RECIPES.map((recipe) => {
+                  const cookCount =
+                    cookedCounts[recipe.id] ??
+                    (meta.discoveredItems.includes(recipe.dishName) ? 1 : 0);
+                  const isUnlocked = cookCount > 0;
+
+                  return (
+                    <div
+                      key={recipe.id}
+                      className={`pixel-panel-inner p-3.5 flex flex-col justify-between gap-3 ${
+                        isUnlocked ? 'border-[#d99b26] bg-[#211810]' : 'border-[#3c2b1e] opacity-80'
+                      }`}
+                    >
+                      <div className="space-y-2">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <h3 className="font-pixel text-sm text-[#ffd95a] flex items-center gap-1.5">
+                              {!isUnlocked && <Lock className="w-3.5 h-3.5 text-[#8c7a65] shrink-0" />}
+                              <span className="truncate">
+                                {isUnlocked ? recipe.dishName : '???（尚未烹煮）'}
+                              </span>
+                            </h3>
+                            <p className="text-[11px] font-num text-[#f59d56] mt-0.5">
+                              {isUnlocked ? recipe.piggyRating : '尚未品嚐評分'}
+                            </p>
+                          </div>
+                          <div className="text-right shrink-0 font-num">
+                            <div className="text-xs font-bold text-[#9fd67a]">
+                              持續 {recipe.durationTurns} 回合
+                            </div>
+                            <div className="text-[11px] text-[#cbb89e]">
+                              {isUnlocked ? `已煮 ${cookCount} 次` : '未解鎖'}
+                            </div>
+                          </div>
+                        </div>
+
+                        {isUnlocked ? (
+                          <p className="text-xs text-[#e6d5b8] leading-relaxed">
+                            {recipe.description}
+                          </p>
+                        ) : (
+                          <p className="text-xs text-[#9c8a74] leading-relaxed">
+                            尚未在營地小鍋子試做過這道料理，收集對應食材開火烹飪即可解鎖完整食譜與小豬食評！
+                          </p>
+                        )}
+
+                        <div className="bg-[#17110d] border border-[#3c2b1e] px-2.5 py-2 space-y-1 text-[11px]">
+                          <div className="flex items-start justify-between gap-2">
+                            <span className="text-[#b8a58d] shrink-0">Buff 效果</span>
+                            <span className="font-num text-[#8ef0a4] text-right">
+                              {isUnlocked ? recipe.effectLabel : '烹飪後揭曉強力回合增益'}
+                            </span>
+                          </div>
+                          <div className="flex items-start justify-between gap-2">
+                            <span className="text-[#b8a58d] shrink-0">食材線索</span>
+                            <span className="text-[#e6d5b8] text-right">{recipe.ingredientHint}</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Piggy's Food Review */}
+                      <div
+                        className={`border px-2.5 py-2 flex items-start gap-2.5 ${
+                          isUnlocked
+                            ? 'bg-[#2a2013] border-[#8f6a28]'
+                            : 'bg-[#15100c] border-[#332419]'
+                        }`}
+                      >
+                        <div className="shrink-0 mt-0.5">
+                          <PigPortrait
+                            mood={isUnlocked ? 'rich' : 'hungry'}
+                            className="w-8 h-8"
+                          />
+                        </div>
+                        <div className="min-w-0 flex-1 space-y-0.5">
+                          <div className="text-[11px] font-pixel text-[#f3b562]">
+                            小豬試吃評價
+                          </div>
+                          <p
+                            className={`text-xs leading-relaxed ${
+                              isUnlocked ? 'text-[#f5ebd9]' : 'text-[#8c7a65]'
+                            }`}
+                          >
+                            {isUnlocked
+                              ? recipe.piggyReview
+                              : '「咕嚕嚕……肚子好餓，快丟兩樣食材進鍋子讓我嚐嚐看嘛！」'}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             </>
           )}
