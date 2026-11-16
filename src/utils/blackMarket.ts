@@ -101,6 +101,16 @@ const MYSTERY_BOX_OFFER: CatalogTemplate = {
   stock: 2,
 };
 
+const MAP_FRAGMENT_OFFER: CatalogTemplate = {
+  id: 'bm_map_fragment',
+  name: '泛黃藏寶圖碎片',
+  category: 'ingredient',
+  description: '泥巴獾從酒鬼狐狸口袋順來的古舊羊皮碎片，集滿 3 片就能合成「完整泥巴藏寶圖」挖寶！',
+  effectSummary: '尋寶素材 · 集滿 3 片開挖 3×3 黃金秘寶',
+  basePrice: 14,
+  stock: 2,
+};
+
 export const BLACK_MARKET_REROLL_COST = 10;
 
 export function getBlackMarketCycleIndex(turn: number): number {
@@ -118,7 +128,10 @@ export function generateBlackMarketOffers(
   const gearOrTonicB =
     TONIC_AND_GEAR_CATALOG[(seed + 1) % TONIC_AND_GEAR_CATALOG.length];
 
-  return [ingA, ingB, gearOrTonicA, gearOrTonicB, MYSTERY_BOX_OFFER].map((item) => ({
+  const specialOffer =
+    (cycleIndex + rerollCount) % 2 === 0 ? MYSTERY_BOX_OFFER : MAP_FRAGMENT_OFFER;
+
+  return [ingA, ingB, gearOrTonicA, gearOrTonicB, specialOffer].map((item) => ({
     ...item,
     purchasedCount: 0,
   }));
@@ -162,13 +175,21 @@ export function normalizeBlackMarketState(raw: unknown, currentTurn = 1): BlackM
   };
 }
 
-export function calculateBlackMarketPrice(basePrice: number, badgerAffinity: number): number {
+export function calculateBlackMarketPrice(
+  basePrice: number,
+  badgerAffinity: number,
+  mutatorDiscountBonus = 0
+): number {
   const tier = getAffinityTier(badgerAffinity);
-  if (tier.discountRate <= 0) return basePrice;
-  return Math.max(4, Math.round(basePrice * (1 - tier.discountRate)));
+  const totalDiscount = Math.min(0.45, tier.discountRate + Math.max(0, mutatorDiscountBonus));
+  if (totalDiscount <= 0) return basePrice;
+  return Math.max(4, Math.round(basePrice * (1 - totalDiscount)));
 }
 
-export function estimateItemSellPrice(itemName: string): number | null {
+export function estimateItemSellPrice(
+  itemName: string,
+  sellMultiplier = 1
+): number | null {
   const lower = itemName.trim().toLowerCase();
   if (!lower) return null;
   if (lower.includes('黃金黑松露')) {
@@ -176,26 +197,27 @@ export function estimateItemSellPrice(itemName: string): number | null {
     return null;
   }
 
+  let base = 12;
   const profile = getItemEquipmentProfile(itemName);
   if (profile.categoryLabel === '傳說武器' || profile.categoryLabel === '傳說護具') {
-    return 48;
-  }
-  if (profile.categoryLabel === '強效武器') {
-    return 32;
-  }
-  if (profile.categoryLabel === '尋寶飾品') {
-    return lower.includes('松露') ? 24 : 26;
-  }
-  if (profile.categoryLabel === '近戰裝備' || profile.categoryLabel === '防護裝備') {
-    return lower.includes('生鏽') ? 10 : 20;
-  }
-  if (profile.categoryLabel === '隨身補給') {
+    base = 48;
+  } else if (profile.categoryLabel === '強效武器') {
+    base = 32;
+  } else if (profile.categoryLabel === '尋寶飾品') {
+    base = lower.includes('松露') ? 24 : 26;
+  } else if (profile.categoryLabel === '近戰裝備' || profile.categoryLabel === '防護裝備') {
+    base = lower.includes('生鏽') ? 10 : 20;
+  } else if (profile.categoryLabel === '隨身補給') {
     if (lower.includes('料理') || lower.includes('活力') || lower.includes('藥水')) {
-      return 18;
+      base = 18;
+    } else {
+      base = 10;
     }
-    return 10;
+  } else if (lower.includes('藏寶圖')) {
+    base = 10;
   }
-  return 12;
+
+  return Math.max(4, Math.round(base * Math.max(1, sellMultiplier)));
 }
 
 export interface DuplicateClutterSummary {
@@ -206,7 +228,8 @@ export interface DuplicateClutterSummary {
 
 export function findDuplicateSellableClutter(
   inventory: string[],
-  equipment: EquipmentState
+  equipment: EquipmentState,
+  sellMultiplier = 1
 ): DuplicateClutterSummary {
   const seen = new Set<string>();
   if (equipment.mainHand) seen.add(equipment.mainHand);
@@ -217,7 +240,8 @@ export function findDuplicateSellableClutter(
   let totalCoins = 0;
 
   inventory.forEach((item, idx) => {
-    const sellPrice = estimateItemSellPrice(item);
+    if (item.includes('藏寶圖')) return;
+    const sellPrice = estimateItemSellPrice(item, sellMultiplier);
     if (sellPrice === null) return;
     if (seen.has(item)) {
       indicesToSell.push(idx);

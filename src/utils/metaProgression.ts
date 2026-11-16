@@ -311,12 +311,14 @@ export function calculateRunEndTrufflePoints(params: {
   unlockedCount: number;
   defeatedBossCount: number;
   foundTruffle: boolean;
+  truffleMultiplier?: number;
 }): number {
-  return Math.max(
+  const base = Math.max(
     6,
     Math.floor(params.turn * 1.5) +
       params.unlockedCount * 8 +
       params.defeatedBossCount * 8 +
       (params.foundTruffle ? 25 : 0)
   );
+  return Math.round(base * Math.max(1, params.truffleMultiplier ?? 1));
 }

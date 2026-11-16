@@ -9,6 +9,7 @@ import {
   CloudRain,
   Compass,
   Crown,
+  Dices,
   Flame,
   FolderOpen,
   Gift,
@@ -17,6 +18,7 @@ import {
   Heart,
   Map as WorldMapIcon,
   Moon,
+  Pickaxe,
   RotateCcw,
   ScrollText,
   Send,
@@ -112,6 +114,40 @@ import {
 import { SkillTreeModal } from './components/SkillTreeModal';
 import { CompendiumModal, type CompendiumTab } from './components/CompendiumModal';
 import { BlackMarketModal } from './components/BlackMarketModal';
+import { FateDiceModal } from './components/FateDiceModal';
+import { TreasureMapModal } from './components/TreasureMapModal';
+import {
+  canCraftCompleteMap,
+  COMPLETE_MAP_NAME,
+  consumeOneCompleteMap,
+  countCompleteMaps,
+  countMapFragments,
+  craftCompleteTreasureMap,
+  MAP_FRAGMENTS_REQUIRED,
+  maybeRollMapFragment,
+  type TreasureCell,
+} from './utils/treasureMap';
+import {
+  getDailyFeaturedMutator,
+  getMutatorById,
+  normalizeMutatorId,
+  RUN_MUTATORS,
+} from './utils/mutators';
+import {
+  calculateCursedRelicModifiers,
+  CURSED_RELIC_BOX_COST,
+  CURSED_RELIC_PURIFY_COST,
+  getCursedRelicById,
+  MAX_CURSED_RELICS,
+  normalizeActiveRelicIds,
+  pickAvailableCursedRelics,
+  type CursedRelicDefinition,
+} from './utils/cursedRelics';
+import {
+  FATE_DICE_COOLDOWN_TURNS,
+  FATE_DICE_OIL_COST,
+  type FateDiceResolution,
+} from './utils/fateDice';
 import {
   createActiveSeasonalQuest,
   findSeasonalTargetIndex,
@@ -191,8 +227,11 @@ import type {
   BlackMarketOffer,
   BlackMarketState,
   CompanionLogEvent,
+  CursedRelicId,
+  CursedRelicLogEvent,
   DmTurnResponse,
   EquipSlot,
+  FateDiceLogEvent,
   GameOverSummary,
   GamePhase,
   LegacyUpgradeId,
@@ -200,6 +239,7 @@ import type {
   LogEntry,
   MasteryId,
   MetaProgressionState,
+  MutatorId,
   NpcAffinityEvent,
   NpcId,
   PlayerStats,
@@ -207,6 +247,7 @@ import type {
   SeasonalQuestLogEvent,
   SkillId,
   TalentId,
+  TreasureLogEvent,
   UnlockedAchievement,
 } from './types/game';
 
@@ -273,6 +314,9 @@ interface SavedAdventureState {
   blackMarketState?: BlackMarketState;
   activeCompanionId?: NpcId | null;
   sharedDishLastTurn?: number;
+  activeRelicIds?: CursedRelicId[];
+  lastFateRollTurn?: number;
+  activeMutatorId?: MutatorId | null;
   runTrufflePointsClaimed?: boolean;
   lastRunTruffleReward?: number;
   savedAt: string;
@@ -351,6 +395,10 @@ function loadSavedAdventure(): SavedAdventureState | null {
           : null,
       sharedDishLastTurn:
         typeof parsed.sharedDishLastTurn === 'number' ? parsed.sharedDishLastTurn : 0,
+      activeRelicIds: normalizeActiveRelicIds(parsed.activeRelicIds),
+      lastFateRollTurn:
+        typeof parsed.lastFateRollTurn === 'number' ? parsed.lastFateRollTurn : 0,
+      activeMutatorId: normalizeMutatorId(parsed.activeMutatorId),
       runTrufflePointsClaimed: Boolean(parsed.runTrufflePointsClaimed),
       lastRunTruffleReward:
         typeof parsed.lastRunTruffleReward === 'number' ? parsed.lastRunTruffleReward : 0,
@@ -426,6 +474,14 @@ export default function App() {
   const [activeCompanionId, setActiveCompanionId] = useState<NpcId | null>(null);
   const [sharedDishLastTurn, setSharedDishLastTurn] = useState<number>(0);
   const [companionNotice, setCompanionNotice] = useState<string | null>(null);
+  const [activeRelicIds, setActiveRelicIds] = useState<CursedRelicId[]>([]);
+  const [lastFateRollTurn, setLastFateRollTurn] = useState<number>(0);
+  const [isFateDiceOpen, setIsFateDiceOpen] = useState<boolean>(false);
+  const [relicNotice, setRelicNotice] = useState<string | null>(null);
+  const [selectedMutatorId, setSelectedMutatorId] = useState<MutatorId | null>(null);
+  const [activeMutatorId, setActiveMutatorId] = useState<MutatorId | null>(null);
+  const [isTreasureMapOpen, setIsTreasureMapOpen] = useState<boolean>(false);
+  const [treasureNotice, setTreasureNotice] = useState<string | null>(null);
   const [runTrufflePointsClaimed, setRunTrufflePointsClaimed] = useState<boolean>(false);
   const [lastRunTruffleReward, setLastRunTruffleReward] = useState<number>(0);
   const [metaProgression, setMetaProgression] = useState<MetaProgressionState>(() =>
@@ -445,6 +501,8 @@ export default function App() {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const streamedEntryIdsRef = useRef<Set<string>>(new Set());
   const cookingFeedbackTimerRef = useRef<number | null>(null);
+  const latestHpRef = useRef<number>(stats.hp);
+  latestHpRef.current = stats.hp;
 
   useEffect(() => {
     return () => {
@@ -492,6 +550,9 @@ export default function App() {
         blackMarketState,
         activeCompanionId,
         sharedDishLastTurn,
+        activeRelicIds,
+        lastFateRollTurn,
+        activeMutatorId,
         runTrufflePointsClaimed,
         lastRunTruffleReward,
         savedAt: new Date().toISOString(),
@@ -524,6 +585,9 @@ export default function App() {
     blackMarketState,
     activeCompanionId,
     sharedDishLastTurn,
+    activeRelicIds,
+    lastFateRollTurn,
+    activeMutatorId,
     runTrufflePointsClaimed,
     lastRunTruffleReward,
   ]);
@@ -542,6 +606,12 @@ export default function App() {
     return 'normal';
   }, [phase, stats.hp, stats.hunger, stats.coins, foundTruffle]);
 
+  const activeMutator = useMemo(() => getMutatorById(activeMutatorId), [activeMutatorId]);
+  const dailyFeaturedMutator = useMemo(() => getDailyFeaturedMutator(), []);
+  const mapFragmentCount = useMemo(() => countMapFragments(stats.inventory), [stats.inventory]);
+  const completeMapCount = useMemo(() => countCompleteMaps(stats.inventory), [stats.inventory]);
+  const canCraftMapNow = useMemo(() => canCraftCompleteMap(stats.inventory), [stats.inventory]);
+
   const currentScore = useMemo(
     () =>
       calculateAdventureScore({
@@ -550,8 +620,9 @@ export default function App() {
         titleCount: runUnlocked.length,
         foundTruffle,
         hp: stats.hp,
+        scoreMultiplier: activeMutator?.scoreMultiplier ?? 1,
       }),
-    [turn, stats.coins, runUnlocked.length, foundTruffle, stats.hp]
+    [turn, stats.coins, runUnlocked.length, foundTruffle, stats.hp, activeMutator?.scoreMultiplier]
   );
 
   const bestTitle = runUnlocked.length > 0 ? runUnlocked[runUnlocked.length - 1].title : '';
@@ -642,7 +713,12 @@ export default function App() {
   );
 
   const executeTurn = useCallback(
-    async (isStart: boolean, actionText?: string, overrideStartStats?: PlayerStats) => {
+    async (
+      isStart: boolean,
+      actionText?: string,
+      overrideStartStats?: PlayerStats,
+      overrideMutatorId?: MutatorId | null
+    ) => {
       if (isLoading) return;
       const cleanAction = actionText?.trim() || '';
       if (!isStart && !cleanAction) return;
@@ -657,6 +733,14 @@ export default function App() {
       const currentCompanionId = isStart ? null : activeCompanionId;
       const turnCompanionDef = getCompanionDefinition(currentCompanionId);
       const turnCompanionNpc = currentCompanionId ? getNpcById(currentCompanionId) ?? null : null;
+      const currentRelicIds = isStart ? [] : activeRelicIds;
+      const turnRelicMods = calculateCursedRelicModifiers(currentRelicIds);
+      const effectiveMutatorId = isStart
+        ? overrideMutatorId !== undefined
+          ? overrideMutatorId
+          : selectedMutatorId
+        : activeMutatorId;
+      const turnMutator = getMutatorById(effectiveMutatorId);
       const nextTurnNumber = isStart ? 1 : turn + 1;
       const nextWorldCycle = getWorldCycleState(nextTurnNumber);
       const turnSkillMods = calculateSkillModifiers(
@@ -895,6 +979,24 @@ export default function App() {
                     perkLabel: turnCompanionDef.adventurePerkLabel,
                   }
                 : null,
+            cursedRelics:
+              currentRelicIds.length > 0
+                ? currentRelicIds
+                    .map((id) => getCursedRelicById(id))
+                    .filter((r): r is CursedRelicDefinition => Boolean(r))
+                    .map((r) => ({
+                      name: r.name,
+                      perk: r.perkLabel,
+                      curse: r.curseLabel,
+                    }))
+                : null,
+            mutator: turnMutator
+              ? {
+                  name: turnMutator.name,
+                  bonusLabel: turnMutator.bonusLabel,
+                  penaltyLabel: turnMutator.penaltyLabel,
+                }
+              : null,
           }),
         });
 
@@ -975,7 +1077,7 @@ export default function App() {
 
         const dm: DmTurnResponse = resolvedDm;
 
-        // Enforce hunger, starvation, equipment bonuses, skill tree passives, talent multipliers, world cycle & random event rules cleanly
+        // Enforce hunger, starvation, equipment bonuses, skill tree passives, talent multipliers, cursed relics, world cycle & random event rules cleanly
         let rawHungerDelta = isStart ? 0 : dm.hunger_change;
         if (!isStart && rawHungerDelta === 0) {
           rawHungerDelta = -6;
@@ -991,6 +1093,12 @@ export default function App() {
           ) {
             rawHungerDelta -= nextWorldCycle.modifiers.extraHungerDrain;
           }
+          if (rawHungerDelta <= 0 && turnRelicMods.extraHungerDrain > 0) {
+            rawHungerDelta -= turnRelicMods.extraHungerDrain;
+          }
+          if (rawHungerDelta <= 0 && (turnMutator?.extraHungerDrain ?? 0) > 0) {
+            rawHungerDelta -= turnMutator!.extraHungerDrain;
+          }
           const totalHungerSave =
             equipBonuses.hungerSaveBonus +
             turnFoodBuffMods.hungerSaveFlat +
@@ -998,11 +1106,10 @@ export default function App() {
           if (rawHungerDelta < 0 && totalHungerSave > 0) {
             rawHungerDelta = -Math.max(1, Math.abs(rawHungerDelta) - totalHungerSave);
           }
-          if (rawHungerDelta > 0 && baseStats.modifiers.foodGainMultiplier !== 1) {
-            rawHungerDelta = Math.max(
-              1,
-              Math.round(rawHungerDelta * baseStats.modifiers.foodGainMultiplier)
-            );
+          const totalFoodGainMult =
+            baseStats.modifiers.foodGainMultiplier * turnRelicMods.hungerGainMultiplier;
+          if (rawHungerDelta > 0 && totalFoodGainMult !== 1) {
+            rawHungerDelta = Math.max(1, Math.round(rawHungerDelta * totalFoodGainMult));
           } else if (rawHungerDelta < 0 && combinedHungerDrainMult !== 1) {
             rawHungerDelta = -Math.max(
               1,
@@ -1012,11 +1119,10 @@ export default function App() {
         }
 
         let eventHungerDelta = rolledEvent?.event.hungerDelta ?? 0;
-        if (eventHungerDelta > 0 && baseStats.modifiers.foodGainMultiplier !== 1) {
-          eventHungerDelta = Math.max(
-            1,
-            Math.round(eventHungerDelta * baseStats.modifiers.foodGainMultiplier)
-          );
+        const totalEventFoodMult =
+          baseStats.modifiers.foodGainMultiplier * turnRelicMods.hungerGainMultiplier;
+        if (eventHungerDelta > 0 && totalEventFoodMult !== 1) {
+          eventHungerDelta = Math.max(1, Math.round(eventHungerDelta * totalEventFoodMult));
         } else if (eventHungerDelta < 0 && combinedHungerDrainMult !== 1) {
           eventHungerDelta = -Math.max(
             1,
@@ -1041,14 +1147,20 @@ export default function App() {
           const combatMitigation = Math.floor(
             equipBonuses.defenseBonus +
               (turnCompanionDef?.defenseBonus ?? 0) +
-              (equipBonuses.attackBonus + turnFoodBuffMods.attackBonus) * 0.5
+              (equipBonuses.attackBonus +
+                turnFoodBuffMods.attackBonus +
+                turnRelicMods.attackBonus +
+                (turnMutator?.attackBonus ?? 0)) *
+                0.5
           );
           let reduced = Math.max(1, Math.abs(rawHpDelta) - combatMitigation);
           const effectiveDamageMult = Math.max(
             0.35,
-            turnSkillMods.damageReductionMultiplier -
+            (turnSkillMods.damageReductionMultiplier -
               turnFoodBuffMods.damageReductionBonus -
-              (turnCompanionDef?.damageReductionBonus ?? 0)
+              (turnCompanionDef?.damageReductionBonus ?? 0)) *
+              turnRelicMods.damageTakenMultiplier *
+              (turnMutator?.damageTakenMultiplier ?? 1)
           );
           if (effectiveDamageMult !== 1) {
             reduced = Math.max(1, Math.round(reduced * effectiveDamageMult));
@@ -1063,12 +1175,15 @@ export default function App() {
         ) {
           rawHpDelta = Math.round(rawHpDelta * baseStats.modifiers.foodGainMultiplier);
         }
-        if (!isStart && dm.hunger_change > 0 && turnSkillMods.eatBonusHp > 0) {
-          rawHpDelta += turnSkillMods.eatBonusHp;
+        const totalEatBonusHp = turnSkillMods.eatBonusHp + turnRelicMods.eatHpBonus;
+        if (!isStart && dm.hunger_change > 0 && totalEatBonusHp > 0) {
+          rawHpDelta += totalEatBonusHp;
         }
 
         const eventHpDelta = rolledEvent?.event.hpDelta ?? 0;
-        const totalHpDelta = isStart ? 0 : rawHpDelta + eventHpDelta - starvationDamage;
+        const totalHpDelta = isStart
+          ? 0
+          : rawHpDelta + eventHpDelta - starvationDamage - turnRelicMods.hpDrainPerTurn;
         let rawNextHp = baseStats.hp + totalHpDelta;
         let cheatDeathTriggered = false;
         if (
@@ -1084,7 +1199,8 @@ export default function App() {
         const totalRegenHp =
           turnSkillMods.regenHpPerTurn +
           turnFoodBuffMods.regenHpPerTurn +
-          (turnCompanionDef?.regenHpPerTurn ?? 0);
+          (turnCompanionDef?.regenHpPerTurn ?? 0) +
+          turnRelicMods.regenHpPerTurn;
         if (!isStart && rawNextHp > 0 && totalRegenHp > 0) {
           rawNextHp += totalRegenHp;
         }
@@ -1110,9 +1226,17 @@ export default function App() {
         const totalCoinBonusRatio =
           turnSkillMods.coinGainBonusRatio +
           turnFoodBuffMods.coinGainBonusRatio +
-          (turnCompanionDef?.coinGainBonusRatio ?? 0);
+          (turnCompanionDef?.coinGainBonusRatio ?? 0) +
+          turnRelicMods.coinGainBonusRatio -
+          turnRelicMods.coinGainPenaltyRatio +
+          (turnMutator?.coinGainBonusRatio ?? 0);
         if (!isStart && rawCoinsDelta > 0 && totalCoinBonusRatio > 0) {
           rawCoinsDelta += Math.max(1, Math.round(rawCoinsDelta * totalCoinBonusRatio));
+        } else if (!isStart && rawCoinsDelta > 0 && totalCoinBonusRatio < 0) {
+          rawCoinsDelta = Math.max(
+            1,
+            Math.round(rawCoinsDelta * Math.max(0.4, 1 + totalCoinBonusRatio))
+          );
         }
         if (!isStart && rawCoinsDelta > 0 && baseStats.modifiers.coinGainMultiplier > 1) {
           rawCoinsDelta = Math.max(
@@ -1325,20 +1449,49 @@ export default function App() {
               };
             }
           }
+
+          if (turnRelicMods.affinityDrainPerTurn > 0) {
+            const victimNpc =
+              MUD_KINGDOM_NPCS[nextTurnNumber % MUD_KINGDOM_NPCS.length] ?? MUD_KINGDOM_NPCS[0];
+            nextNpcAffinities[victimNpc.id] = clamp(
+              (nextNpcAffinities[victimNpc.id] ?? victimNpc.initialAffinity) -
+                turnRelicMods.affinityDrainPerTurn,
+              0,
+              100
+            );
+          }
         }
 
-        // Skill Tree + Food Buff + Forest Companion passive item discovery bonus
+        // Skill Tree + Food Buff + Forest Companion + Cursed Relic + Run Mutator passive item discovery & treasure map drop
         const bonusForagedItem = !isStart
           ? rollSkillBonusForageItem(
               turnSkillMods.itemDiscoveryBonus +
                 turnFoodBuffMods.itemDiscoveryBonus +
-                (turnCompanionDef?.itemDiscoveryBonus ?? 0),
+                (turnCompanionDef?.itemDiscoveryBonus ?? 0) +
+                turnRelicMods.itemDiscoveryBonus +
+                (turnMutator?.itemDiscoveryBonus ?? 0),
               Boolean(actuallyGained || rolledEvent?.event.tempItem),
               baseStats.learnedSkillIds.includes('foraging_5')
             )
           : null;
         if (bonusForagedItem) {
           nextInventory.push(bonusForagedItem);
+        }
+
+        const rolledMapFragment = !isStart
+          ? maybeRollMapFragment(
+              nextTurnNumber,
+              (turnSkillMods.itemDiscoveryBonus + (turnMutator?.itemDiscoveryBonus ?? 0)) * 0.25
+            )
+          : null;
+        let resolvedBonusForage = bonusForagedItem;
+        if (rolledMapFragment) {
+          nextInventory.push(rolledMapFragment);
+          if (!actuallyGained) {
+            actuallyGained = rolledMapFragment;
+          } else if (!resolvedBonusForage) {
+            resolvedBonusForage = rolledMapFragment;
+          }
         }
 
         // Forest Companion periodic turn support (foraging ingredients / supplies)
@@ -1349,15 +1502,17 @@ export default function App() {
           nextInventory.push(companionSupport.giftedItem);
         }
 
+        const totalBonusCoinOnItemFind =
+          turnSkillMods.bonusCoinOnItemFind + turnRelicMods.bonusCoinOnItemFind;
         if (
           !isStart &&
-          turnSkillMods.bonusCoinOnItemFind > 0 &&
+          totalBonusCoinOnItemFind > 0 &&
           (actuallyGained ||
             rolledEvent?.event.tempItem ||
-            bonusForagedItem ||
+            resolvedBonusForage ||
             companionSupport.giftedItem)
         ) {
-          nextCoins += turnSkillMods.bonusCoinOnItemFind;
+          nextCoins += totalBonusCoinOnItemFind;
           appliedCoinsChange = nextCoins - baseStats.coins;
         }
 
@@ -1368,8 +1523,13 @@ export default function App() {
           region: bossPre.region,
           defeatedBossIds: isStart ? [] : defeatedBossIds,
           actionText: cleanAction,
-          attackBonus: equipBonuses.attackBonus + turnFoodBuffMods.attackBonus,
+          attackBonus:
+            equipBonuses.attackBonus +
+            turnFoodBuffMods.attackBonus +
+            turnRelicMods.attackBonus +
+            (turnMutator?.attackBonus ?? 0),
           level: baseStats.level,
+          critBonus: turnRelicMods.bossCritBonus + (turnMutator?.bossCritBonus ?? 0),
         });
 
         let bossRewardFoundTruffle = false;
@@ -1422,7 +1582,9 @@ export default function App() {
 
         const rawGainedXp = calculateTurnXpGain({
           isStart,
-          foundItem: Boolean(actuallyGained || bonusForagedItem || rolledEvent?.event.tempItem),
+          foundItem: Boolean(
+            actuallyGained || resolvedBonusForage || rolledEvent?.event.tempItem
+          ),
           gainedCoins: appliedCoinsChange > 0,
           completedQuest:
             turnQuestEvent?.type === 'completed' ||
@@ -1432,7 +1594,10 @@ export default function App() {
         });
         const totalXpMult =
           turnSkillMods.xpGainMultiplier *
-          (legacyBonuses.xpMultiplier + (turnCompanionDef?.xpMultiplierBonus ?? 0));
+          (legacyBonuses.xpMultiplier +
+            (turnCompanionDef?.xpMultiplierBonus ?? 0) +
+            turnRelicMods.xpMultiplierBonus +
+            (turnMutator?.xpMultiplierBonus ?? 0));
         const gainedXp =
           rawGainedXp > 0
             ? Math.max(1, Math.round(rawGainedXp * totalXpMult))
@@ -1482,7 +1647,7 @@ export default function App() {
           randomEvent: rolledEvent ? rolledEvent.event : null,
           questEvent: turnQuestEvent,
           levelUp: turnLevelUp,
-          bonusForagedItem,
+          bonusForagedItem: resolvedBonusForage,
           npcAffinityEvent: turnAffinityEvent,
           cheatDeathTriggered,
           bossEvent: bossPost.bossEvent,
@@ -1548,6 +1713,7 @@ export default function App() {
           titleCount: nextUnlockedRun.length,
           foundTruffle: nextFoundTruffle,
           hp: nextHp,
+          scoreMultiplier: turnMutator?.scoreMultiplier ?? 1,
         });
 
         // Update persistent Compendium & Meta-Progression Truffle Points
@@ -1569,6 +1735,7 @@ export default function App() {
             unlockedCount: nextUnlockedRun.length,
             defeatedBossCount: bossPost.nextDefeatedBossIds.length,
             foundTruffle: nextFoundTruffle,
+            truffleMultiplier: turnMutator?.trufflePointsMultiplier ?? 1,
           });
           setRunTrufflePointsClaimed(true);
           setLastRunTruffleReward(runEndBonusPoints);
@@ -1670,6 +1837,9 @@ export default function App() {
       seasonalTriggeredInRun,
       blackMarketState.cycleIndex,
       activeCompanionId,
+      activeRelicIds,
+      activeMutatorId,
+      selectedMutatorId,
       legacyBonuses.xpMultiplier,
       runTrufflePointsClaimed,
       firebaseUser,
@@ -1706,6 +1876,14 @@ export default function App() {
     setActiveCompanionId(null);
     setSharedDishLastTurn(0);
     setCompanionNotice(null);
+    setActiveRelicIds([]);
+    setLastFateRollTurn(0);
+    setIsFateDiceOpen(false);
+    setRelicNotice(null);
+    setSelectedMutatorId(null);
+    setActiveMutatorId(null);
+    setIsTreasureMapOpen(false);
+    setTreasureNotice(null);
     setRunTrufflePointsClaimed(false);
     setLastRunTruffleReward(0);
     setCraftNotice(null);
@@ -1723,19 +1901,36 @@ export default function App() {
     setPhase('TALENT_SELECT');
   };
 
-  const handleConfirmTalentAndStart = (talentId: TalentId) => {
+  const handleConfirmTalentAndStart = (
+    talentId: TalentId,
+    mutatorId: MutatorId | null = selectedMutatorId
+  ) => {
     if (isLoading) return;
     const chosen = getTalentById(talentId);
+    const chosenMutator = getMutatorById(mutatorId);
     const activeLegacy = calculateLegacyBonuses(metaProgression.legacyUpgrades);
-    const maxHp = INITIAL_STATS.maxHp + activeLegacy.maxHpBonus;
-    const maxHunger = INITIAL_STATS.maxHunger + activeLegacy.maxHungerBonus;
-    const startingHunger = Math.min(
-      maxHunger,
-      INITIAL_STATS.hunger + activeLegacy.startingHungerBonus
+    const maxHp = Math.max(
+      40,
+      INITIAL_STATS.maxHp + activeLegacy.maxHpBonus + (chosenMutator?.maxHpDelta ?? 0)
     );
-    const startingInventory = activeLegacy.startingMainHand
-      ? ['半顆蘋果']
-      : [...INITIAL_STATS.inventory];
+    const maxHunger = INITIAL_STATS.maxHunger + activeLegacy.maxHungerBonus;
+    const startingHunger = clamp(
+      INITIAL_STATS.hunger +
+        activeLegacy.startingHungerBonus +
+        (chosenMutator?.startingHungerDelta ?? 0),
+      20,
+      maxHunger
+    );
+    const startingCoins = Math.max(
+      0,
+      INITIAL_STATS.coins +
+        activeLegacy.startingCoinsBonus +
+        (chosenMutator?.startingCoinsDelta ?? 0)
+    );
+    const startingInventory = [
+      ...(activeLegacy.startingMainHand ? ['半顆蘋果'] : [...INITIAL_STATS.inventory]),
+      ...(chosenMutator?.startingItems ?? []),
+    ];
 
     const startingStats: PlayerStats = {
       ...INITIAL_STATS,
@@ -1743,7 +1938,7 @@ export default function App() {
       maxHp,
       hunger: startingHunger,
       maxHunger,
-      coins: INITIAL_STATS.coins + activeLegacy.startingCoinsBonus,
+      coins: startingCoins,
       inventory: startingInventory,
       equipment: {
         mainHand: activeLegacy.startingMainHand,
@@ -1753,6 +1948,7 @@ export default function App() {
       talentId: chosen?.id ?? null,
       modifiers: chosen?.modifiers ?? DEFAULT_TALENT_MODIFIERS,
     };
+    setActiveMutatorId(chosenMutator?.id ?? null);
     setMetaProgression((prev) => ({
       ...prev,
       totalRuns: prev.totalRuns + 1,
@@ -1760,7 +1956,7 @@ export default function App() {
     retroAudio.playClick();
     setStats(startingStats);
     setMobileTab('adventure');
-    executeTurn(true, undefined, startingStats);
+    executeTurn(true, undefined, startingStats, chosenMutator?.id ?? null);
   };
 
   const handleLoadLastAdventure = () => {
@@ -1796,6 +1992,15 @@ export default function App() {
     setActiveCompanionId(saved.activeCompanionId ?? null);
     setSharedDishLastTurn(saved.sharedDishLastTurn ?? 0);
     setCompanionNotice(null);
+    setActiveRelicIds(normalizeActiveRelicIds(saved.activeRelicIds));
+    setLastFateRollTurn(saved.lastFateRollTurn ?? 0);
+    setIsFateDiceOpen(false);
+    setRelicNotice(null);
+    const restoredMutatorId = normalizeMutatorId(saved.activeMutatorId);
+    setActiveMutatorId(restoredMutatorId);
+    setSelectedMutatorId(restoredMutatorId);
+    setIsTreasureMapOpen(false);
+    setTreasureNotice(null);
     setRunTrufflePointsClaimed(Boolean(saved.runTrufflePointsClaimed));
     setLastRunTruffleReward(saved.lastRunTruffleReward ?? 0);
     setCustomAction('');
@@ -2092,7 +2297,11 @@ export default function App() {
     if (phase !== 'PLAYING' || isLoading) return;
     if (offer.purchasedCount >= offer.stock) return;
     const badgerAffinity = npcAffinities.badger_merchant ?? 10;
-    const finalPrice = calculateBlackMarketPrice(offer.basePrice, badgerAffinity);
+    const finalPrice = calculateBlackMarketPrice(
+      offer.basePrice,
+      badgerAffinity,
+      activeMutator?.blackMarketDiscountBonus ?? 0
+    );
     if (stats.coins < finalPrice) {
       setBlackMarketNotice(`豬豬幣不足，需要 ${finalPrice} 枚豬豬幣！`);
       return;
@@ -2173,7 +2382,10 @@ export default function App() {
     if (phase !== 'PLAYING' || isLoading) return;
     const targetItem = stats.inventory[inventoryIndex];
     if (!targetItem) return;
-    const sellPrice = estimateItemSellPrice(targetItem);
+    const sellPrice = estimateItemSellPrice(
+      targetItem,
+      activeMutator?.blackMarketSellMultiplier ?? 1
+    );
     if (sellPrice === null) {
       setBlackMarketNotice('「黃金黑松露」是王國至寶，泥巴獾不敢收購！');
       return;
@@ -2206,7 +2418,11 @@ export default function App() {
 
   const handleSellDuplicateClutter = () => {
     if (phase !== 'PLAYING' || isLoading) return;
-    const summary = findDuplicateSellableClutter(stats.inventory, stats.equipment);
+    const summary = findDuplicateSellableClutter(
+      stats.inventory,
+      stats.equipment,
+      activeMutator?.blackMarketSellMultiplier ?? 1
+    );
     if (summary.indicesToSell.length === 0) {
       setBlackMarketNotice('目前背包沒有可一鍵清倉的重複雜物。');
       return;
@@ -2256,6 +2472,385 @@ export default function App() {
     setBlackMarketNotice(`花費 ${BLACK_MARKET_REROLL_COST} 幣請泥巴獾換上全新秘密貨物！`);
   };
 
+  const equipCursedRelicInternal = (
+    relic: CursedRelicDefinition,
+    sourceLabel: string,
+    coinSpend = 0
+  ) => {
+    if (activeRelicIds.includes(relic.id) || activeRelicIds.length >= MAX_CURSED_RELICS) {
+      return false;
+    }
+
+    setActiveRelicIds((prev) => [...prev, relic.id]);
+
+    let nextHpAfter = stats.hp;
+    let nextHungerAfter = stats.hunger;
+    const bonusMaxHp = relic.maxHpBonus ?? 0;
+    const bonusMaxHunger = relic.maxHungerBonus ?? 0;
+
+    setStats((prev) => {
+      const nextCoins = Math.max(0, prev.coins - coinSpend);
+      const nextMaxHp = prev.maxHp + bonusMaxHp;
+      const nextHp = Math.min(nextMaxHp, prev.hp + bonusMaxHp);
+      const nextMaxHunger = prev.maxHunger + bonusMaxHunger;
+      const nextHunger = Math.min(nextMaxHunger, prev.hunger + bonusMaxHunger);
+      nextHpAfter = nextHp;
+      nextHungerAfter = nextHunger;
+      return {
+        ...prev,
+        coins: nextCoins,
+        maxHp: nextMaxHp,
+        hp: nextHp,
+        maxHunger: nextMaxHunger,
+        hunger: nextHunger,
+      };
+    });
+
+    const relicEvent: CursedRelicLogEvent = {
+      type: 'equipped',
+      relicId: relic.id,
+      relicName: relic.name,
+      perkLabel: relic.perkLabel,
+      curseLabel: relic.curseLabel,
+      coinsSpent: coinSpend > 0 ? coinSpend : undefined,
+    };
+
+    const entryId = `${Date.now()}-relic-eq-${relic.id}`;
+    const logEntry: LogEntry = {
+      id: entryId,
+      turn: Math.max(1, turn),
+      playerAction: `【${sourceLabel}】裝備雙面詛咒遺物「${relic.name}」`,
+      story: `小豬從${sourceLabel}獲得了「${relic.name}」（${relic.subtitle}）！祝福「${relic.perkLabel}」立刻湧現，但代價「${relic.curseLabel}」也悄悄纏上了身⋯⋯`,
+      deltas: {
+        hpChange: bonusMaxHp,
+        hungerChange: bonusMaxHunger,
+        coinsChange: -coinSpend,
+        starvationDamage: 0,
+        newItem: null,
+        lostItem: null,
+      },
+      hpAfter: nextHpAfter,
+      hungerAfter: nextHungerAfter,
+      imagePrompt: currentImagePrompt,
+      choices: currentChoices,
+      relicEvent,
+    };
+    setLogs((prev) => [...prev, logEntry]);
+
+    setMetaProgression((prev) => ({
+      ...prev,
+      discoveredItems: Array.from(new Set([...prev.discoveredItems, relic.name])),
+    }));
+
+    setRelicNotice(`已裝備「${relic.name}」：${relic.perkLabel}（代價：${relic.curseLabel}）`);
+    return true;
+  };
+
+  const handleResolveFateDice = (resolution: FateDiceResolution, usedLuckyOil: boolean) => {
+    if (phase !== 'PLAYING') return;
+    const oilCost = usedLuckyOil ? FATE_DICE_OIL_COST : 0;
+
+    const nextHp = clamp(stats.hp + resolution.hpDelta, 1, stats.maxHp);
+    const nextHunger = clamp(stats.hunger + resolution.hungerDelta, 0, stats.maxHunger);
+    const netCoinsDelta = resolution.coinsDelta - oilCost;
+    const nextCoins = Math.max(0, stats.coins + netCoinsDelta);
+    const nextInventory = resolution.gainedItem
+      ? [...stats.inventory, resolution.gainedItem]
+      : [...stats.inventory];
+
+    const levelProgression = advanceLevelAndXp(
+      stats.level,
+      stats.xp,
+      stats.skillPoints,
+      resolution.xpGain
+    );
+    const diceLevelUp: LevelUpInfo | null =
+      levelProgression.gainedLevels > 0
+        ? {
+            fromLevel: stats.level,
+            toLevel: levelProgression.level,
+            gainedPoints: levelProgression.gainedLevels,
+          }
+        : null;
+
+    setStats((prev) => ({
+      ...prev,
+      hp: nextHp,
+      hunger: nextHunger,
+      coins: nextCoins,
+      inventory: nextInventory,
+      level: levelProgression.level,
+      xp: levelProgression.xp,
+      skillPoints: levelProgression.skillPoints,
+    }));
+
+    if (resolution.bossDamage > 0 && activeBoss) {
+      setActiveBoss((prev) =>
+        prev
+          ? {
+              ...prev,
+              hp: Math.max(1, prev.hp - resolution.bossDamage),
+            }
+          : null
+      );
+    }
+
+    setLastFateRollTurn(turn);
+
+    if (resolution.tier === 'crit_success' || diceLevelUp) {
+      retroAudio.playAchievement();
+    } else if (resolution.tier === 'crit_fail' || resolution.hpDelta < 0) {
+      retroAudio.playHurt();
+    } else if (resolution.coinsDelta > 0) {
+      retroAudio.playCoin();
+    } else {
+      retroAudio.playEat();
+    }
+
+    const diceEvent: FateDiceLogEvent = {
+      scenarioTitle: resolution.scenario.title,
+      rawRoll: resolution.rawRoll,
+      bonusTotal: resolution.bonusTotal,
+      finalScore: resolution.finalScore,
+      tier: resolution.tier,
+      tierLabel: resolution.tierLabel,
+      summary: resolution.storyText,
+      coinsDelta: netCoinsDelta,
+      hpDelta: nextHp - stats.hp,
+      hungerDelta: nextHunger - stats.hunger,
+      gainedItem: resolution.gainedItem,
+      bossDamage: resolution.bossDamage > 0 ? resolution.bossDamage : undefined,
+      offeredRelicName: resolution.offeredRelic?.name ?? null,
+      usedLuckyOil,
+    };
+
+    const entryId = `${Date.now()}-dice-${turn}`;
+    const diceEntry: LogEntry = {
+      id: entryId,
+      turn,
+      playerAction: `【D6 命運擲骰】${resolution.scenario.title}`,
+      story: resolution.storyText,
+      deltas: {
+        hpChange: nextHp - stats.hp,
+        hungerChange: nextHunger - stats.hunger,
+        coinsChange: netCoinsDelta,
+        starvationDamage: 0,
+        newItem: resolution.gainedItem,
+        lostItem: null,
+      },
+      hpAfter: nextHp,
+      hungerAfter: nextHunger,
+      imagePrompt: currentImagePrompt,
+      choices: currentChoices,
+      levelUp: diceLevelUp,
+      diceEvent,
+    };
+
+    setLogs((prev) => [...prev, diceEntry]);
+
+    if (resolution.gainedItem) {
+      setMetaProgression((prev) => ({
+        ...prev,
+        discoveredItems: Array.from(new Set([...prev.discoveredItems, resolution.gainedItem!])),
+      }));
+    }
+  };
+
+  const handleAcceptFateOfferedRelic = (relic: CursedRelicDefinition) => {
+    if (phase !== 'PLAYING') return;
+    retroAudio.playEquip();
+    equipCursedRelicInternal(relic, 'D6 命運擲骰');
+  };
+
+  const handleDeclineFateOfferedRelic = () => {
+    if (phase !== 'PLAYING') return;
+    retroAudio.playCoin();
+    setStats((prev) => ({
+      ...prev,
+      coins: prev.coins + 10,
+    }));
+    setRelicNotice('婉拒了雙面詛咒遺物，荷官補贈 +10 枚豬豬幣！');
+  };
+
+  const handleDrawBlackMarketRelicBox = () => {
+    if (phase !== 'PLAYING' || isLoading) return;
+    if (activeRelicIds.length >= MAX_CURSED_RELICS) {
+      setBlackMarketNotice(`雙面遺物欄位已滿（${MAX_CURSED_RELICS}/${MAX_CURSED_RELICS}），請先淨化卸除其中一件！`);
+      return;
+    }
+    if (stats.coins < CURSED_RELIC_BOX_COST) {
+      setBlackMarketNotice(`豬豬幣不足 ${CURSED_RELIC_BOX_COST} 枚，無法開啟封印遺物箱！`);
+      return;
+    }
+    const candidate = pickAvailableCursedRelics(activeRelicIds, 1)[0];
+    if (!candidate) {
+      setBlackMarketNotice('目前沒有其他可抽取的雙面遺物。');
+      return;
+    }
+    retroAudio.playAchievement();
+    equipCursedRelicInternal(candidate, '黑市封印遺物箱', CURSED_RELIC_BOX_COST);
+    setBlackMarketNotice(
+      `解開封印！裝備「${candidate.name}」— 祝福：${candidate.perkLabel}｜代價：${candidate.curseLabel}`
+    );
+  };
+
+  const handlePurifyCursedRelic = (relicId: CursedRelicId) => {
+    if (phase !== 'PLAYING' || isLoading) return;
+    if (!activeRelicIds.includes(relicId)) return;
+    const relic = getCursedRelicById(relicId);
+    if (!relic) return;
+    if (stats.coins < CURSED_RELIC_PURIFY_COST) {
+      const msg = `豬豬幣不足 ${CURSED_RELIC_PURIFY_COST} 枚，無法淨化「${relic.name}」！`;
+      setRelicNotice(msg);
+      setBlackMarketNotice(msg);
+      return;
+    }
+
+    retroAudio.playEquip();
+    setActiveRelicIds((prev) => prev.filter((id) => id !== relicId));
+
+    const bonusMaxHp = relic.maxHpBonus ?? 0;
+    const bonusMaxHunger = relic.maxHungerBonus ?? 0;
+    let nextHpAfter = stats.hp;
+    let nextHungerAfter = stats.hunger;
+
+    setStats((prev) => {
+      const nextMaxHp = Math.max(100, prev.maxHp - bonusMaxHp);
+      const nextHp = clamp(prev.hp, 1, nextMaxHp);
+      const nextMaxHunger = Math.max(100, prev.maxHunger - bonusMaxHunger);
+      const nextHunger = clamp(prev.hunger, 0, nextMaxHunger);
+      nextHpAfter = nextHp;
+      nextHungerAfter = nextHunger;
+      return {
+        ...prev,
+        coins: Math.max(0, prev.coins - CURSED_RELIC_PURIFY_COST),
+        maxHp: nextMaxHp,
+        hp: nextHp,
+        maxHunger: nextMaxHunger,
+        hunger: nextHunger,
+      };
+    });
+
+    const relicEvent: CursedRelicLogEvent = {
+      type: 'purified',
+      relicId: relic.id,
+      relicName: relic.name,
+      perkLabel: relic.perkLabel,
+      curseLabel: relic.curseLabel,
+      coinsSpent: CURSED_RELIC_PURIFY_COST,
+    };
+
+    const entryId = `${Date.now()}-relic-purify-${relic.id}`;
+    const logEntry: LogEntry = {
+      id: entryId,
+      turn: Math.max(1, turn),
+      playerAction: `【淨化儀式】卸除雙面遺物「${relic.name}」`,
+      story: `泥巴獾掏出聖水與刷子替小豬清洗掉「${relic.name}」的詛咒殘留（-${CURSED_RELIC_PURIFY_COST} 幣），小豬覺得身體輕盈了許多！`,
+      deltas: {
+        hpChange: 0,
+        hungerChange: 0,
+        coinsChange: -CURSED_RELIC_PURIFY_COST,
+        starvationDamage: 0,
+        newItem: null,
+        lostItem: null,
+      },
+      hpAfter: nextHpAfter,
+      hungerAfter: nextHungerAfter,
+      imagePrompt: currentImagePrompt,
+      choices: currentChoices,
+      relicEvent,
+    };
+    setLogs((prev) => [...prev, logEntry]);
+
+    const doneMsg = `已花費 ${CURSED_RELIC_PURIFY_COST} 幣淨化並卸除「${relic.name}」！`;
+    setRelicNotice(doneMsg);
+    setBlackMarketNotice(doneMsg);
+  };
+
+  const handleCraftCompleteMap = () => {
+    if (phase !== 'PLAYING' || isLoading) return;
+    const nextInv = craftCompleteTreasureMap(stats.inventory);
+    if (!nextInv) return;
+    setStats((prev) => ({
+      ...prev,
+      inventory: nextInv,
+    }));
+    setMetaProgression((prev) => ({
+      ...prev,
+      discoveredItems: Array.from(new Set([...prev.discoveredItems, COMPLETE_MAP_NAME])),
+    }));
+    setTreasureNotice(`已將 ${MAP_FRAGMENTS_REQUIRED} 片碎片拼湊為「${COMPLETE_MAP_NAME}」！`);
+  };
+
+  const handleStartTreasureDig = (): boolean => {
+    if (phase !== 'PLAYING' || isLoading) return false;
+    const nextInv = consumeOneCompleteMap(stats.inventory);
+    if (!nextInv) return false;
+    setStats((prev) => ({
+      ...prev,
+      inventory: nextInv,
+    }));
+    return true;
+  };
+
+  const handleDigTreasureCell = (cell: TreasureCell) => {
+    if (phase !== 'PLAYING') return;
+    if (cell.hpDelta !== 0) {
+      latestHpRef.current = clamp(latestHpRef.current + cell.hpDelta, 1, stats.maxHp);
+    }
+    setStats((prev) => ({
+      ...prev,
+      coins: Math.max(0, prev.coins + cell.coins),
+      hp: cell.hpDelta !== 0 ? clamp(prev.hp + cell.hpDelta, 1, prev.maxHp) : prev.hp,
+      inventory: cell.item ? [...prev.inventory, cell.item] : prev.inventory,
+    }));
+    if (cell.trufflePoints > 0 || cell.item) {
+      setMetaProgression((prev) => ({
+        ...prev,
+        trufflePoints: prev.trufflePoints + cell.trufflePoints,
+        discoveredItems: cell.item
+          ? Array.from(new Set([...prev.discoveredItems, cell.item]))
+          : prev.discoveredItems,
+      }));
+    }
+  };
+
+  const handleFinishTreasureSession = (summary: TreasureLogEvent) => {
+    if (summary.tilesDug <= 0) return;
+    const entryId = `${Date.now()}-treasure-${turn}`;
+    const itemsText =
+      summary.gainedItems.length > 0 ? `，並挖出「${summary.gainedItems.join('、')}」` : '';
+    const trapText =
+      summary.hpDelta < 0 ? `（途中被泥巴蟹鉗傷 ${summary.hpDelta} HP）` : '';
+    const logEntry: LogEntry = {
+      id: entryId,
+      turn: Math.max(1, turn),
+      playerAction: `【豬鼻挖寶】展開完整泥巴藏寶圖探索 ${summary.tilesDug} 格`,
+      story: `${
+        summary.foundGrandChest
+          ? '小豬嗅著濃郁的松露香氣精準下鏟，挖開了黃金松露秘寶箱！'
+          : '小豬沿著藏寶圖標記揮動小鏟子翻找泥巴地！'
+      }本趟共進帳 +${summary.coinsEarned} 豬豬幣、+${summary.trufflePointsEarned} 松露點數${itemsText}${trapText}。`,
+      deltas: {
+        hpChange: summary.hpDelta,
+        hungerChange: 0,
+        coinsChange: summary.coinsEarned,
+        starvationDamage: 0,
+        newItem: summary.gainedItems[0] ?? null,
+        lostItem: null,
+      },
+      hpAfter: latestHpRef.current,
+      hungerAfter: stats.hunger,
+      imagePrompt: currentImagePrompt,
+      choices: currentChoices,
+      treasureEvent: summary,
+    };
+    setLogs((prev) => [...prev, logEntry]);
+    setTreasureNotice(
+      `挖寶結束：+${summary.coinsEarned} 幣、+${summary.trufflePointsEarned} 松露點${itemsText}`
+    );
+  };
+
   const handleSubmitCustomAction = (e: React.FormEvent) => {
     e.preventDefault();
     if (phase !== 'PLAYING' || isLoading || !customAction.trim()) return;
@@ -2269,6 +2864,8 @@ export default function App() {
         isLeaderboardOpen ||
         isSkillTreeOpen ||
         isBlackMarketOpen ||
+        isFateDiceOpen ||
+        isTreasureMapOpen ||
         compendiumModalState.open ||
         phase !== 'PLAYING' ||
         isLoading
@@ -2292,6 +2889,8 @@ export default function App() {
     isLeaderboardOpen,
     isSkillTreeOpen,
     isBlackMarketOpen,
+    isFateDiceOpen,
+    isTreasureMapOpen,
     compendiumModalState.open,
     phase,
     isLoading,
@@ -2364,6 +2963,14 @@ export default function App() {
     () => formatEquipmentBonusTags(equipmentBonuses),
     [equipmentBonuses]
   );
+  const cursedRelicMods = useMemo(
+    () => calculateCursedRelicModifiers(activeRelicIds),
+    [activeRelicIds]
+  );
+  const fateDiceCooldownRemaining =
+    turn > 0 && lastFateRollTurn > 0
+      ? Math.max(0, FATE_DICE_COOLDOWN_TURNS - (turn - lastFateRollTurn))
+      : 0;
 
   return (
     <div className="min-h-[100dvh] flex flex-col max-w-[1400px] mx-auto px-2.5 sm:px-6 pt-2.5 pt-safe pb-24 lg:py-4 gap-2.5 sm:gap-4">
@@ -2394,6 +3001,14 @@ export default function App() {
                       <span className="text-[#7ce06b]">
                         Lv.{stats.level}
                         {stats.skillPoints > 0 ? `+${stats.skillPoints}` : ''}
+                      </span>
+                    </>
+                  )}
+                  {activeMutator && (
+                    <>
+                      <span aria-hidden="true">·</span>
+                      <span className="font-bold" style={{ color: activeMutator.accentColor }}>
+                        ×{activeMutator.scoreMultiplier.toFixed(2)}
                       </span>
                     </>
                   )}
@@ -2570,6 +3185,14 @@ export default function App() {
                   <span aria-hidden="true">·</span>
                   <span className="text-[#9fd67a]">
                     天賦：{activeTalent.name}（{activeTalent.effectLabel}）
+                  </span>
+                </>
+              )}
+              {activeMutator && (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <span className="font-medium" style={{ color: activeMutator.accentColor }}>
+                    試煉：{activeMutator.name}（積分×{activeMutator.scoreMultiplier.toFixed(2)}）
                   </span>
                 </>
               )}
@@ -3477,6 +4100,97 @@ export default function App() {
                   })}
                 </div>
 
+                {/* STEP 2: Optional Run Mutator & Daily Featured Trial */}
+                <div className="border-t-2 border-[#4a3525] pt-4 space-y-2.5">
+                  <div className="text-center space-y-1">
+                    <p className="text-xs text-[#ffd95a] font-pixel">
+                      STEP 2 · 泥巴試煉詞綴與每日挑戰（可選）
+                    </p>
+                    <p className="text-xs text-[#cbb89e]">
+                      掛上高風險試煉詞綴可提升結算「冒險積分」與「松露點數」倍率，也能維持標準難度出發。
+                    </p>
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-2">
+                    <button
+                      type="button"
+                      disabled={isLoading}
+                      onClick={() => {
+                        retroAudio.playClick();
+                        setSelectedMutatorId(null);
+                      }}
+                      className={`pixel-btn p-3 text-left flex items-center justify-between gap-2 cursor-pointer disabled:opacity-60 ${
+                        selectedMutatorId === null
+                          ? 'bg-[#33251c] border-[#9fd67a]'
+                          : 'bg-[#211812] hover:bg-[#2d2017]'
+                      }`}
+                    >
+                      <div className="min-w-0">
+                        <div className="font-pixel text-xs text-[#f5ebd9]">
+                          標準冒險（無額外詞綴）
+                        </div>
+                        <p className="text-[11px] text-[#b8a58d]">
+                          平衡節奏探索泥巴王國，積分與松露點維持 1.00× 標準倍率。
+                        </p>
+                      </div>
+                      {selectedMutatorId === null && (
+                        <Check className="w-4 h-4 text-[#9fd67a] shrink-0" />
+                      )}
+                    </button>
+
+                    {RUN_MUTATORS.map((mutator) => {
+                      const isSelected = selectedMutatorId === mutator.id;
+                      const isDaily = dailyFeaturedMutator.id === mutator.id;
+                      return (
+                        <button
+                          key={mutator.id}
+                          type="button"
+                          disabled={isLoading}
+                          onClick={() => {
+                            retroAudio.playClick();
+                            setSelectedMutatorId(mutator.id);
+                          }}
+                          className={`pixel-btn p-3 text-left flex items-start justify-between gap-2.5 cursor-pointer disabled:opacity-60 ${
+                            isSelected
+                              ? 'bg-[#362614] border-[#ffd95a]'
+                              : isDaily
+                              ? 'bg-[#261d12] border-[#8f6a28] hover:bg-[#332617]'
+                              : 'bg-[#211812] hover:bg-[#2d2017]'
+                          }`}
+                        >
+                          <div className="min-w-0 flex-1 space-y-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span
+                                className="font-pixel text-xs sm:text-sm"
+                                style={{ color: mutator.accentColor }}
+                              >
+                                {mutator.name}
+                              </span>
+                              <span className="text-[11px] text-[#cbb89e]">
+                                · {mutator.subtitle}
+                              </span>
+                              {isDaily && (
+                                <span className="text-[10px] font-bold px-1.5 py-0.5 bg-[#3a2a10] border border-[#ffd95a] text-[#ffd95a]">
+                                  今日推薦試煉 ★
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-[11px] text-[#9fd67a] font-num">
+                              [強化] {mutator.bonusLabel}
+                            </p>
+                            <p className="text-[11px] text-[#ff9b8c] font-num">
+                              [代價] {mutator.penaltyLabel}
+                            </p>
+                          </div>
+                          {isSelected && (
+                            <Check className="w-4 h-4 text-[#ffd95a] shrink-0 mt-1" />
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
                 <div className="flex items-center justify-center gap-3 pt-1">
                   <button
                     type="button"
@@ -3489,10 +4203,16 @@ export default function App() {
                   <button
                     type="button"
                     disabled={isLoading}
-                    onClick={() => handleConfirmTalentAndStart(selectedTalentId)}
+                    onClick={() =>
+                      handleConfirmTalentAndStart(selectedTalentId, selectedMutatorId)
+                    }
                     className="pixel-btn pixel-btn-primary px-6 py-2.5 font-pixel text-sm cursor-pointer disabled:opacity-60"
                   >
-                    {isLoading ? '正在召喚地下城主...' : '確認天賦，踏出泥巴村！'}
+                    {isLoading
+                      ? '正在召喚地下城主...'
+                      : selectedMutatorId
+                      ? `帶上「${getMutatorById(selectedMutatorId)?.name}」出發！`
+                      : '確認天賦，踏出泥巴村！'}
                   </button>
                 </div>
               </div>
@@ -3769,6 +4489,77 @@ export default function App() {
                     </div>
                   )}
 
+                  {entry.diceEvent && (
+                    <div className="px-3 py-2 border bg-[#261d12] border-[#d99b26] flex items-start gap-2.5 text-xs">
+                      <Dices className="w-4 h-4 text-[#ffd95a] shrink-0 mt-0.5" />
+                      <div className="min-w-0 space-y-0.5">
+                        <p className="font-pixel text-[#ffd95a]">
+                          {entry.diceEvent.tierLabel} · 骰面 {entry.diceEvent.rawRoll} ＋ 加成{' '}
+                          {entry.diceEvent.bonusTotal} ＝ {entry.diceEvent.finalScore} 點
+                        </p>
+                        <p className="text-[#dfd4c1] font-num">
+                          {entry.diceEvent.scenarioTitle}
+                          {entry.diceEvent.usedLuckyOil ? '（使用幸運骰油）' : ''}
+                          {entry.diceEvent.bossDamage
+                            ? ` · Boss 傷害 -${entry.diceEvent.bossDamage}`
+                            : ''}
+                          {entry.diceEvent.offeredRelicName
+                            ? ` · 奇遇遺物「${entry.diceEvent.offeredRelicName}」`
+                            : ''}
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {entry.relicEvent && (
+                    <div
+                      className={`px-3 py-2 border flex items-start gap-2.5 text-xs ${
+                        entry.relicEvent.type === 'equipped'
+                          ? 'bg-[#281515] border-[#e05a47]'
+                          : 'bg-[#1a2417] border-[#5f8c4d]'
+                      }`}
+                    >
+                      <Skull
+                        className={`w-4 h-4 shrink-0 mt-0.5 ${
+                          entry.relicEvent.type === 'equipped'
+                            ? 'text-[#ff7b6b]'
+                            : 'text-[#9fd67a]'
+                        }`}
+                      />
+                      <div className="min-w-0 space-y-0.5">
+                        <p className="font-pixel text-[#ffd95a]">
+                          {entry.relicEvent.type === 'equipped'
+                            ? `裝備雙面遺物：${entry.relicEvent.relicName}`
+                            : `淨化雙面遺物：${entry.relicEvent.relicName}`}
+                        </p>
+                        <p className="text-[#9fd67a]">[祝福] {entry.relicEvent.perkLabel}</p>
+                        <p className="text-[#ff9b8c]">[代價] {entry.relicEvent.curseLabel}</p>
+                      </div>
+                    </div>
+                  )}
+
+                  {entry.treasureEvent && (
+                    <div className="px-3 py-2 border bg-[#231b0e] border-[#d99b26] flex items-start gap-2.5 text-xs">
+                      <Pickaxe className="w-4 h-4 text-[#ffd95a] shrink-0 mt-0.5" />
+                      <div className="min-w-0 space-y-0.5">
+                        <p className="font-pixel text-[#ffd95a]">
+                          豬鼻藏寶圖開挖（{entry.treasureEvent.tilesDug} 格）
+                          {entry.treasureEvent.foundGrandChest ? ' · 尋獲黃金秘寶箱！' : ''}
+                        </p>
+                        <p className="text-[#9fd67a] font-num">
+                          收穫 +{entry.treasureEvent.coinsEarned} 豬豬幣 · +
+                          {entry.treasureEvent.trufflePointsEarned} 松露點數
+                          {entry.treasureEvent.gainedItems.length > 0
+                            ? ` · 入手「${entry.treasureEvent.gainedItems.join('、')}」`
+                            : ''}
+                          {entry.treasureEvent.hpDelta < 0
+                            ? ` · 蟹鉗 ${entry.treasureEvent.hpDelta} HP`
+                            : ''}
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
                   <TypewriterText
                     text={entry.story}
                     animate={isLatest && !streamedEntryIdsRef.current.has(entry.id)}
@@ -3925,6 +4716,14 @@ export default function App() {
                       <span>·</span>
                     </>
                   )}
+                  {activeMutator && (
+                    <>
+                      <span style={{ color: activeMutator.accentColor }}>
+                        試煉：{activeMutator.name}（×{activeMutator.scoreMultiplier.toFixed(2)}）
+                      </span>
+                      <span>·</span>
+                    </>
+                  )}
                   <span>存活回合：{turn}</span>
                   <span>·</span>
                   <span>遺留豬豬幣：{stats.coins}</span>
@@ -3985,42 +4784,88 @@ export default function App() {
           {/* BOTTOM ACTION CONTROLS */}
           {phase === 'PLAYING' && (
             <div className="border-t-2 border-[#4a3525] pt-2.5 sm:pt-3 space-y-2.5 sm:space-y-3 shrink-0">
-              {(stats.skillPoints > 0 || hasActiveQuestItem || hasActiveSeasonalItem || stats.inventory.length >= 4 || stats.coins >= 25) && (
-                <div className="flex lg:hidden flex-wrap items-center gap-2">
-                  {stats.skillPoints > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => setMobileTab('progress')}
-                      className="pixel-btn bg-[#232b1c] border-[#7ce06b] text-[#9fd67a] px-2.5 py-1.5 text-xs font-medium flex items-center gap-1.5 cursor-pointer"
-                    >
-                      <ArrowUpCircle className="w-3.5 h-3.5 text-[#7ce06b]" />
-                      <span>有 {stats.skillPoints} 點技能點可領悟 →</span>
-                    </button>
-                  )}
-                  {hasActiveQuestItem && (
-                    <button
-                      type="button"
-                      onClick={() => setMobileTab('social')}
-                      className="pixel-btn bg-[#292210] border-[#d99b26] text-[#ffd95a] px-2.5 py-1.5 text-xs font-medium flex items-center gap-1.5 cursor-pointer"
-                    >
-                      <ScrollText className="w-3.5 h-3.5 text-[#ffd95a]" />
-                      <span>委託道具已齊全，點此交付 →</span>
-                    </button>
-                  )}
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  disabled={isLoading}
+                  onClick={() => {
+                    retroAudio.playClick();
+                    setIsFateDiceOpen(true);
+                  }}
+                  className={`pixel-btn px-2.5 sm:px-3 py-1.5 min-h-[38px] text-xs font-medium flex items-center gap-1.5 cursor-pointer disabled:opacity-50 ${
+                    fateDiceCooldownRemaining === 0
+                      ? 'bg-[#2b2010] hover:bg-[#3d2d16] border-[#ffd95a] text-[#ffd95a]'
+                      : 'bg-[#2a1e16] border-[#6b4e37] text-[#cbb89e]'
+                  }`}
+                  title="進入泥巴酒館擲出 1D6 命運判定，高機率獲得稀有食材、Boss 奇襲傷害或雙面詛咒遺物"
+                >
+                  <Dices className="w-3.5 h-3.5 text-[#ffd95a] shrink-0" />
+                  <span>D6 命運擲骰</span>
+                  <span className="font-num text-[11px] text-[#9fd67a]">
+                    {fateDiceCooldownRemaining === 0 ? '· 就緒' : `· 冷卻 ${fateDiceCooldownRemaining}T`}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  disabled={isLoading}
+                  onClick={() => {
+                    retroAudio.playClick();
+                    setIsTreasureMapOpen(true);
+                  }}
+                  className={`pixel-btn px-2.5 sm:px-3 py-1.5 min-h-[38px] text-xs font-medium flex items-center gap-1.5 cursor-pointer disabled:opacity-50 ${
+                    completeMapCount > 0 || canCraftMapNow
+                      ? 'bg-[#2a2310] hover:bg-[#3b3016] border-[#ffd95a] text-[#ffd95a]'
+                      : 'bg-[#2a1e16] border-[#6b4e37] text-[#cbb89e]'
+                  }`}
+                  title="拼湊藏寶圖碎片並在 3×3 泥地挖寶（不消耗冒險回合）"
+                >
+                  <Pickaxe className="w-3.5 h-3.5 text-[#ffd95a] shrink-0" />
+                  <span>藏寶圖挖寶</span>
+                  <span className="font-num text-[11px] text-[#9fd67a]">
+                    {completeMapCount > 0
+                      ? `· 可挖 ${completeMapCount} 張`
+                      : canCraftMapNow
+                      ? '· 可合成!'
+                      : `· 碎片 ${mapFragmentCount}/${MAP_FRAGMENTS_REQUIRED}`}
+                  </span>
+                </button>
+
+                {stats.skillPoints > 0 && (
                   <button
                     type="button"
-                    onClick={() => {
-                      retroAudio.playClick();
-                      setBlackMarketNotice(null);
-                      setIsBlackMarketOpen(true);
-                    }}
-                    className="pixel-btn bg-[#2c2112] border-[#d99b26] text-[#ffd95a] px-2.5 py-1.5 text-xs font-medium flex items-center gap-1.5 cursor-pointer"
+                    onClick={() => setMobileTab('progress')}
+                    className="lg:hidden pixel-btn bg-[#232b1c] border-[#7ce06b] text-[#9fd67a] px-2.5 py-1.5 min-h-[38px] text-xs font-medium flex items-center gap-1.5 cursor-pointer"
                   >
-                    <Store className="w-3.5 h-3.5 text-[#ffd95a]" />
-                    <span>豬豬黑市</span>
+                    <ArrowUpCircle className="w-3.5 h-3.5 text-[#7ce06b]" />
+                    <span>{stats.skillPoints} 技能點 →</span>
                   </button>
-                </div>
-              )}
+                )}
+
+                {hasActiveQuestItem && (
+                  <button
+                    type="button"
+                    onClick={() => setMobileTab('social')}
+                    className="lg:hidden pixel-btn bg-[#292210] border-[#d99b26] text-[#ffd95a] px-2.5 py-1.5 min-h-[38px] text-xs font-medium flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <ScrollText className="w-3.5 h-3.5 text-[#ffd95a]" />
+                    <span>交付委託 →</span>
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    retroAudio.playClick();
+                    setBlackMarketNotice(null);
+                    setIsBlackMarketOpen(true);
+                  }}
+                  className="lg:hidden pixel-btn bg-[#2c2112] border-[#d99b26] text-[#ffd95a] px-2.5 py-1.5 min-h-[38px] text-xs font-medium flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Store className="w-3.5 h-3.5 text-[#ffd95a]" />
+                  <span>豬豬黑市</span>
+                </button>
+              </div>
 
               {activeSeasonalQuest && (
                 <div className="pixel-panel-inner border-[#d99b26] bg-[#241b0f] px-3 py-2 flex flex-wrap items-center justify-between gap-2">
@@ -4504,6 +5349,65 @@ export default function App() {
                 <span>{equipmentBonusTags.join(' · ')}</span>
               </div>
             )}
+
+            {/* Double-Edged Cursed Relics Section */}
+            <div className="border-t border-[#4a3525] pt-2.5 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-pixel text-xs text-[#ffd95a] flex items-center gap-1.5">
+                  <Skull className="w-3.5 h-3.5 text-[#ff7b6b] shrink-0" />
+                  <span>雙面詛咒遺物（高風險流派）</span>
+                </span>
+                <span className="font-num text-[11px] text-[#cbb89e]">
+                  {activeRelicIds.length}/{MAX_CURSED_RELICS}
+                </span>
+              </div>
+
+              {relicNotice && (
+                <div className="pixel-panel-inner border-[#d99b26] bg-[#261d12] px-2.5 py-1.5 text-[11px] text-[#ffd95a]">
+                  {relicNotice}
+                </div>
+              )}
+
+              {activeRelicIds.length === 0 ? (
+                <div className="pixel-panel-inner p-2.5 text-[11px] text-[#9c8a74] leading-relaxed">
+                  尚未裝備詛咒遺物。可在「D6 命運擲骰」大成功奇遇或「豬豬黑市 → 雙面遺物」抽箱取得。
+                </div>
+              ) : (
+                <div className="space-y-1.5">
+                  {activeRelicIds.map((relicId) => {
+                    const relic = getCursedRelicById(relicId);
+                    if (!relic) return null;
+                    return (
+                      <div
+                        key={`sidebar-relic-${relic.id}`}
+                        className="pixel-panel-inner border-[#d99b26] bg-[#21180f] p-2.5 space-y-1"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span
+                            className="font-pixel text-xs truncate"
+                            style={{ color: relic.accentColor }}
+                          >
+                            {relic.name}
+                          </span>
+                          {phase === 'PLAYING' && (
+                            <button
+                              type="button"
+                              disabled={isLoading || stats.coins < CURSED_RELIC_PURIFY_COST}
+                              onClick={() => handlePurifyCursedRelic(relic.id)}
+                              className="pixel-btn bg-[#33251c] hover:bg-[#473326] border-[#8f6a28] text-[#ffd95a] px-2 py-0.5 text-[10px] font-num shrink-0 cursor-pointer disabled:opacity-45"
+                            >
+                              淨化 {CURSED_RELIC_PURIFY_COST} 幣
+                            </button>
+                          )}
+                        </div>
+                        <p className="text-[11px] text-[#9fd67a]">[祝福] {relic.perkLabel}</p>
+                        <p className="text-[11px] text-[#ff9b8c]">[代價] {relic.curseLabel}</p>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Camp Cooking Pot & Multi-Turn Dish Buffs Panel */}
@@ -4745,23 +5649,50 @@ export default function App() {
             </p>
 
             {phase === 'PLAYING' && (
-              <button
-                type="button"
-                onClick={() => {
-                  retroAudio.playClick();
-                  setBlackMarketNotice(null);
-                  setIsBlackMarketOpen(true);
-                }}
-                className="pixel-btn bg-[#2c2112] hover:bg-[#3f2f19] border-[#d99b26] text-[#ffd95a] w-full px-3 py-2.5 min-h-[44px] text-xs font-bold flex items-center justify-between gap-2 cursor-pointer"
-              >
-                <span className="flex items-center gap-1.5">
-                  <Store className="w-4 h-4 text-[#ffd95a]" />
-                  <span>造訪泥巴獾豬豬黑市</span>
-                </span>
-                <span className="font-num text-[11px] text-[#9fd67a]">
-                  買食材／一鍵賣重複雜物 →
-                </span>
-              </button>
+              <div className="space-y-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    retroAudio.playClick();
+                    setBlackMarketNotice(null);
+                    setIsBlackMarketOpen(true);
+                  }}
+                  className="pixel-btn bg-[#2c2112] hover:bg-[#3f2f19] border-[#d99b26] text-[#ffd95a] w-full px-3 py-2.5 min-h-[44px] text-xs font-bold flex items-center justify-between gap-2 cursor-pointer"
+                >
+                  <span className="flex items-center gap-1.5">
+                    <Store className="w-4 h-4 text-[#ffd95a]" />
+                    <span>造訪泥巴獾豬豬黑市</span>
+                  </span>
+                  <span className="font-num text-[11px] text-[#9fd67a]">
+                    買食材／一鍵賣重複雜物 →
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    retroAudio.playClick();
+                    setIsTreasureMapOpen(true);
+                  }}
+                  className="pixel-btn bg-[#231c10] hover:bg-[#342917] border-[#8f6a28] text-[#ffd95a] w-full px-3 py-2.5 min-h-[44px] text-xs font-bold flex items-center justify-between gap-2 cursor-pointer"
+                >
+                  <span className="flex items-center gap-1.5">
+                    <Pickaxe className="w-4 h-4 text-[#ffd95a]" />
+                    <span>豬鼻挖寶藏寶圖</span>
+                  </span>
+                  <span className="font-num text-[11px] text-[#9fd67a]">
+                    {completeMapCount > 0
+                      ? `完整圖 ${completeMapCount} 張 · 開挖 →`
+                      : `碎片 ${mapFragmentCount}/${MAP_FRAGMENTS_REQUIRED} · ${canCraftMapNow ? '可合成!' : '檢視 →'}`}
+                  </span>
+                </button>
+              </div>
+            )}
+
+            {treasureNotice && (
+              <div className="pixel-panel-inner border-[#d99b26] bg-[#231b0e] px-3 py-2 text-xs text-[#ffd95a] leading-relaxed">
+                {treasureNotice}
+              </div>
             )}
 
             {craftNotice && (
@@ -5069,10 +6000,44 @@ export default function App() {
         marketState={blackMarketState}
         marketNotice={blackMarketNotice}
         canTransact={phase === 'PLAYING' && !isLoading}
+        activeRelicIds={activeRelicIds}
+        mutatorDiscountBonus={activeMutator?.blackMarketDiscountBonus ?? 0}
+        mutatorSellMultiplier={activeMutator?.blackMarketSellMultiplier ?? 1}
         onBuyOffer={handleBuyBlackMarketOffer}
         onSellItem={handleSellItemToBlackMarket}
         onSellDuplicates={handleSellDuplicateClutter}
         onRerollMarket={handleRerollBlackMarket}
+        onDrawCursedRelicBox={handleDrawBlackMarketRelicBox}
+        onPurifyRelic={handlePurifyCursedRelic}
+      />
+      <FateDiceModal
+        isOpen={isFateDiceOpen}
+        onClose={() => setIsFateDiceOpen(false)}
+        turn={turn}
+        coins={stats.coins}
+        equipAttack={equipmentBonuses.attackBonus}
+        equipDefense={equipmentBonuses.defenseBonus}
+        activeBuffsCount={activeBuffs.length}
+        hasCompanion={Boolean(activeCompanionId)}
+        relicDiceBonus={cursedRelicMods.diceRollBonus}
+        activeRelicIds={activeRelicIds}
+        hasActiveBoss={Boolean(activeBoss)}
+        activeBossName={activeBoss?.name ?? null}
+        cooldownRemaining={fateDiceCooldownRemaining}
+        canRoll={phase === 'PLAYING' && !isLoading}
+        onApplyRollResult={handleResolveFateDice}
+        onAcceptOfferedRelic={handleAcceptFateOfferedRelic}
+        onDeclineOfferedRelic={handleDeclineFateOfferedRelic}
+      />
+      <TreasureMapModal
+        isOpen={isTreasureMapOpen}
+        onClose={() => setIsTreasureMapOpen(false)}
+        inventory={stats.inventory}
+        canTransact={phase === 'PLAYING' && !isLoading}
+        onCraftCompleteMap={handleCraftCompleteMap}
+        onStartTreasureDig={handleStartTreasureDig}
+        onDigCellResult={handleDigTreasureCell}
+        onFinishSession={handleFinishTreasureSession}
       />
       <OfflineIndicator />
     </div>

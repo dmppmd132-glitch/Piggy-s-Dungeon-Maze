@@ -208,6 +208,16 @@ export interface TurnRequestBody {
     title: string;
     perkLabel: string;
   } | null;
+  cursedRelics?: Array<{
+    name: string;
+    perk: string;
+    curse: string;
+  }> | null;
+  mutator?: {
+    name: string;
+    bonusLabel: string;
+    penaltyLabel: string;
+  } | null;
 }
 
 export interface EpitaphRequestBody {
@@ -444,12 +454,23 @@ function buildTurnPrompt(body: TurnRequestBody): {
       ? `\n- 森林小跟班：${body.companion.npcName}（${body.companion.title}：${body.companion.perkLabel}）正陪在小豬身旁冒險，可適時描寫互動！`
       : '';
 
+  const cursedRelicsText =
+    !isStart && Array.isArray(body.cursedRelics) && body.cursedRelics.length > 0
+      ? `\n- 雙面詛咒遺物：${body.cursedRelics
+          .map((r) => `${r.name}（祝福:${r.perk}／代價:${r.curse}）`)
+          .join('｜')}（若符合情境可幽默描寫其副作用與威力！）`
+      : '';
+
+  const mutatorText = body.mutator
+    ? `\n- 試煉詞綴挑戰：${body.mutator.name}（加成:${body.mutator.bonusLabel}／代價:${body.mutator.penaltyLabel}）`
+    : '';
+
   const userPrompt = isStart
     ? `【第 1 回合開局】
 狀態：HP ${stats.hp}/100｜飽食 ${stats.hunger}/100｜豬豬幣 ${stats.coins}｜背包：${stats.inventory.join('、')}
 ${equipmentText}
 ${skillText}
-${npcAffinitiesText}${foodBuffsText}${worldCyclePrompt}${regionPrompt}
+${npcAffinitiesText}${foodBuffsText}${mutatorText}${worldCyclePrompt}${regionPrompt}
 撰寫小豬剛離開泥巴村莊尋找黃金黑松露的第 1 回合奇遇（所有數值變化與物品增減皆須為 0 / null）。`
     : `【第 ${turn} 回合】
 近期紀錄：
@@ -458,7 +479,7 @@ ${historySummary}
 狀態：HP ${stats.hp}/100｜飽食 ${stats.hunger}/100${stats.hunger <= 0 ? '（飢餓扣血中！）' : ''}｜豬豬幣 ${stats.coins}｜背包：${stats.inventory.join('、') || '空'}
 ${equipmentText}
 ${skillText}
-${npcAffinitiesText}${foodBuffsText}${companionText}${worldCyclePrompt}${regionPrompt}${randomEventPrompt}${questPrompt}${seasonalPrompt}
+${npcAffinitiesText}${foodBuffsText}${companionText}${cursedRelicsText}${mutatorText}${worldCyclePrompt}${regionPrompt}${randomEventPrompt}${questPrompt}${seasonalPrompt}
 玩家行動：「${action}」
 推進劇情、結算合理數值與道具變化，並給出 3 個新選項與英文像素場景提示詞。`;
 

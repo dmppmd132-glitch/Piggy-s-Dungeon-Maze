@@ -31,6 +31,7 @@ export interface ScoreParams {
   titleCount: number;
   foundTruffle: boolean;
   hp: number;
+  scoreMultiplier?: number;
 }
 
 export function calculateAdventureScore({
@@ -39,14 +40,16 @@ export function calculateAdventureScore({
   titleCount,
   foundTruffle,
   hp,
+  scoreMultiplier = 1,
 }: ScoreParams): number {
   if (turn <= 0) return 0;
   const raw =
-    turn * 25 +
-    Math.max(0, coins) * 3 +
-    Math.max(0, titleCount) * 100 +
-    (foundTruffle ? 500 : 0) +
-    (hp > 0 ? hp : 0);
+    (turn * 25 +
+      Math.max(0, coins) * 3 +
+      Math.max(0, titleCount) * 100 +
+      (foundTruffle ? 500 : 0) +
+      (hp > 0 ? hp : 0)) *
+    Math.max(1, scoreMultiplier);
   return Math.max(0, Math.min(1000000, Math.trunc(raw)));
 }
 

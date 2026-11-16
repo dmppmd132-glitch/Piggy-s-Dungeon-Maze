@@ -314,6 +314,58 @@ export interface BlackMarketState {
   affinityBoostedInCycle: boolean;
 }
 
+export type CursedRelicId =
+  | 'greedy_nose_ring'
+  | 'chili_fangs'
+  | 'vampire_fork'
+  | 'gambler_monocle'
+  | 'insomnia_truffle_bell'
+  | 'glutton_iron_stomach';
+
+export interface CursedRelicLogEvent {
+  type: 'equipped' | 'purified';
+  relicId: CursedRelicId;
+  relicName: string;
+  perkLabel: string;
+  curseLabel: string;
+  coinsSpent?: number;
+}
+
+export type FateDiceTier = 'crit_success' | 'success' | 'partial' | 'crit_fail';
+
+export interface FateDiceLogEvent {
+  scenarioTitle: string;
+  rawRoll: number;
+  bonusTotal: number;
+  finalScore: number;
+  tier: FateDiceTier;
+  tierLabel: string;
+  summary: string;
+  coinsDelta: number;
+  hpDelta: number;
+  hungerDelta: number;
+  gainedItem?: string | null;
+  bossDamage?: number;
+  offeredRelicName?: string | null;
+  acceptedRelicName?: string | null;
+  usedLuckyOil?: boolean;
+}
+
+export type MutatorId =
+  | 'starving_sprint'
+  | 'glass_cannon'
+  | 'market_frenzy'
+  | 'wild_forage';
+
+export interface TreasureLogEvent {
+  tilesDug: number;
+  foundGrandChest: boolean;
+  coinsEarned: number;
+  trufflePointsEarned: number;
+  hpDelta: number;
+  gainedItems: string[];
+}
+
 export interface LogEntry {
   id: string;
   turn: number;
@@ -336,6 +388,9 @@ export interface LogEntry {
   expiredBuffNames?: string[];
   seasonalEvent?: SeasonalQuestLogEvent | null;
   companionEvent?: CompanionLogEvent | null;
+  diceEvent?: FateDiceLogEvent | null;
+  relicEvent?: CursedRelicLogEvent | null;
+  treasureEvent?: TreasureLogEvent | null;
 }
 
 export interface GameOverSummary {

@@ -254,6 +254,7 @@ export function calculatePlayerBossDamage(params: {
   actionText: string;
   attackBonus: number;
   level: number;
+  critBonus?: number;
   rng?: () => number;
 }): { damage: number; isCrit: boolean } {
   const rng = params.rng ?? Math.random;
@@ -264,7 +265,7 @@ export function calculatePlayerBossDamage(params: {
   const equipScale = params.attackBonus * 5;
   const levelScale = Math.max(0, params.level - 1) * 3;
   const stanceBonus = isOffensive ? 8 : 0;
-  const isCrit = rng() < 0.22;
+  const isCrit = rng() < Math.min(0.65, 0.22 + (params.critBonus ?? 0));
   const raw = baseRoll + equipScale + levelScale + stanceBonus;
   return {
     damage: isCrit ? Math.round(raw * 1.45) : raw,
@@ -331,6 +332,7 @@ export function resolveBossTurnPostCall(params: {
   actionText: string;
   attackBonus: number;
   level: number;
+  critBonus?: number;
 }): {
   nextBoss: ActiveBossState | null;
   nextDefeatedBossIds: string[];
@@ -355,6 +357,7 @@ export function resolveBossTurnPostCall(params: {
     actionText: params.actionText,
     attackBonus: params.attackBonus,
     level: params.level,
+    critBonus: params.critBonus,
   });
 
   const hpAfter = Math.max(0, boss.hp - damage);
